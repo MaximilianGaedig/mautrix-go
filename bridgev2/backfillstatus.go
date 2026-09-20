@@ -94,7 +94,17 @@ func (portal *Portal) computeBackfillStatus(ctx context.Context, source *UserLog
 	}
 	switch {
 	case task == nil || task.UserLoginID == "":
+		// No task yet is not the same as nothing to fetch: if the network can fetch history at all, the
+		// chat simply hasn't been queued, and asking for it (or the next resync) will.
 		status.State = BackfillStateUnavailable
+		if portal.Bridge.Config.Backfill.Enabled {
+			for _, login := range portal.Bridge.GetAllCachedUserLogins() {
+				if _, ok := login.Client.(BackfillingNetworkAPI); ok {
+					status.State = BackfillStateManual
+					break
+				}
+			}
+		}
 	case task.IsDone:
 		status.State = BackfillStateComplete
 		status.Batches = task.BatchCount
