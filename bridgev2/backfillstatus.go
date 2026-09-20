@@ -19,6 +19,7 @@ import (
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
+	"maunium.net/go/mautrix/id"
 )
 
 // BackfillStatusEventType is the room state event in which the bridge records how much of a chat's
@@ -66,6 +67,31 @@ type BackfillStatusContent struct {
 	CommandPrefix string `json:"command_prefix"`
 	Network       string `json:"network"`
 	UpdatedTS     int64  `json:"updated_ts"`
+}
+
+// BackfillSummaryEventType is where a bridge reports its import as a whole, in the user's management
+// room with that bridge. A client cannot add this up for itself: with sliding sync it only ever holds
+// some of the rooms, so any total it computes reads low.
+var BackfillSummaryEventType = event.Type{Type: "im.mxg.backfill_summary", Class: event.AccountDataEventType}
+
+// BackfillSummaryContent is the content of the [BackfillSummaryEventType] event.
+type BackfillSummaryContent struct {
+	Network string `json:"network"`
+	// Chats with a room, and how many of those have nothing left to import.
+	Chats     int `json:"chats"`
+	ChatsDone int `json:"chats_done"`
+	// Chats by import state, keyed by the same values as [BackfillStatusContent.State].
+	ChatsByState map[string]int `json:"chats_by_state"`
+	// Messages imported across every chat, and what the network says those chats hold - counted over
+	// the chats that could say, which CountedChats gives so a share is not read as a share of all.
+	// CountedImported is the imported side of that same share, each chat capped at its own total: a
+	// network counts service messages the bridge does not import, and without the cap a chat that is
+	// finished can report more than the network says it holds.
+	BridgedMessages int   `json:"bridged_messages"`
+	RemoteMessages  int   `json:"remote_messages,omitempty"`
+	CountedImported int   `json:"counted_imported,omitempty"`
+	CountedChats    int   `json:"counted_chats,omitempty"`
+	UpdatedTS       int64 `json:"updated_ts"`
 }
 
 // BackfillCountingNetworkAPI is implemented by network connectors that can say how many messages a
@@ -228,10 +254,11 @@ func (portal *Portal) ComputeBackfillStatus(ctx context.Context, source *UserLog
 }
 
 // PublishBackfillStatus records the portal's import progress in its room. Changes of state go out at
-// once; a growing count at most every half minute. force sends it regardless.
-func (portal *Portal) PublishBackfillStatus(ctx context.Context, source *UserLogin, force bool) {
+// once; a growing count at most every half minute. force sends it regardless. It returns the status it
+// computed, published or not, so a caller walking every portal can add them up without computing twice.
+func (portal *Portal) PublishBackfillStatus(ctx context.Context, source *UserLogin, force bool) *BackfillStatusContent {
 	if portal.MXID == "" || portal.Bridge.IsStopping() {
-		return
+		return nil
 	}
 	log := zerolog.Ctx(ctx).With().Str("action", "publish backfill status").Logger()
 	ctx = log.WithContext(ctx)
@@ -239,7 +266,7 @@ func (portal *Portal) PublishBackfillStatus(ctx context.Context, source *UserLog
 	status, err := portal.computeBackfillStatus(ctx, source, force)
 	if err != nil {
 		log.Err(err).Msg("Failed to compute backfill status")
-		return
+		return nil
 	}
 	state.lock.Lock()
 	defer state.lock.Unlock()
@@ -250,18 +277,19 @@ func (portal *Portal) PublishBackfillStatus(ctx context.Context, source *UserLog
 		// every copy stays in the room's timeline for every client to store. A bridge restart used to
 		// republish an identical status for every chat it has.
 		if unchanged {
-			return
+			return status
 		}
 		if !force && time.Since(state.lastSent) < backfillStatusMinInterval && state.last.State == status.State {
-			return
+			return status
 		}
 	}
 	if err := portal.writeBackfillStatus(ctx, source, status); err != nil {
 		log.Err(err).Msg("Failed to send backfill status")
-		return
+		return status
 	}
 	state.last = status
 	state.lastSent = time.Now()
+	return status
 }
 
 // doublePuppetForStatus is the user's own intent, when the bridge has one and it can carry the status.
@@ -296,23 +324,29 @@ func (portal *Portal) rememberPrevious(previous, status *BackfillStatusContent) 
 // Without a double puppet the bridge cannot write the user's account data, so it falls back to the room
 // state the bot can write.
 func (portal *Portal) writeBackfillStatus(ctx context.Context, source *UserLogin, status *BackfillStatusContent) error {
+	return portal.Bridge.writeForUser(ctx, source, portal.MXID, BackfillStatusEventType, status)
+}
+
+// writeForUser puts content where the user's own clients will see it and nobody else's do.
+func (br *Bridge) writeForUser(ctx context.Context, source *UserLogin, room id.RoomID, evtType event.Type, content any) error {
 	if dp, ok := source.doublePuppetForStatus(ctx); ok {
-		return dp.SetRoomAccountData(ctx, portal.MXID, BackfillStatusEventType.Type, status)
+		return dp.SetRoomAccountData(ctx, room, evtType.Type, content)
 	}
-	_, err := portal.Bridge.Bot.SendState(
-		ctx, portal.MXID, BackfillStatusEventType, "", &event.Content{Parsed: status}, time.Time{},
-	)
+	stateType := evtType
+	stateType.Class = event.StateEventType
+	_, err := br.Bot.SendState(ctx, room, stateType, "", &event.Content{Parsed: content}, time.Time{})
 	return err
 }
 
-// PublishAllBackfillStatuses brings every portal's status event up to date: at startup, and after
-// a bulk change to backfill tasks.
+// PublishAllBackfillStatuses brings every portal's status up to date, and each user's summary of them:
+// at startup, and after a bulk change to backfill tasks.
 func (br *Bridge) PublishAllBackfillStatuses(ctx context.Context) {
 	portals, err := br.GetAllPortalsWithMXID(ctx)
 	if err != nil {
 		br.Log.Err(err).Msg("Failed to list portals to publish backfill statuses")
 		return
 	}
+	summaries := map[*UserLogin]*BackfillSummaryContent{}
 	for _, portal := range portals {
 		if br.IsStopping() || ctx.Err() != nil {
 			return
@@ -323,10 +357,55 @@ func (br *Bridge) PublishAllBackfillStatuses(ctx context.Context) {
 		}
 		// Ask the network for the chat's total too (when the connector can say), so "x of y" is there from
 		// the start and for chats that finished before totals were tracked.
-		portal.PublishBackfillStatus(ctx, source, true)
+		status := portal.PublishBackfillStatus(ctx, source, true)
+		if source != nil && status != nil {
+			summaryFor(summaries, source).add(status)
+		}
 		time.Sleep(50 * time.Millisecond)
 	}
+	for source, summary := range summaries {
+		br.publishBackfillSummary(ctx, source, summary)
+	}
 	br.Log.Info().Int("portals", len(portals)).Msg("Published backfill statuses")
+}
+
+func summaryFor(summaries map[*UserLogin]*BackfillSummaryContent, source *UserLogin) *BackfillSummaryContent {
+	summary, ok := summaries[source]
+	if !ok {
+		summary = &BackfillSummaryContent{
+			Network:      source.Bridge.Network.GetName().DisplayName,
+			ChatsByState: map[string]int{},
+		}
+		summaries[source] = summary
+	}
+	return summary
+}
+
+func (summary *BackfillSummaryContent) add(status *BackfillStatusContent) {
+	summary.Chats++
+	summary.ChatsByState[status.State]++
+	if status.State != BackfillStateRunning {
+		summary.ChatsDone++
+	}
+	summary.BridgedMessages += status.BridgedMessages
+	if status.RemoteTotal != nil {
+		summary.CountedChats++
+		summary.RemoteMessages += *status.RemoteTotal
+		summary.CountedImported += min(status.BridgedMessages, *status.RemoteTotal)
+	}
+}
+
+// publishBackfillSummary writes the login's totals to its management room, where a client finds them
+// whether or not it happens to be holding the rooms they were counted from.
+func (br *Bridge) publishBackfillSummary(ctx context.Context, source *UserLogin, summary *BackfillSummaryContent) {
+	room, err := source.User.GetManagementRoom(ctx)
+	if err != nil || room == "" {
+		return
+	}
+	summary.UpdatedTS = time.Now().UnixMilli()
+	if err := br.writeForUser(ctx, source, room, BackfillSummaryEventType, summary); err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to publish the import summary")
+	}
 }
 
 // RequestFullBackfill makes the queue import the portal's whole remaining history.
