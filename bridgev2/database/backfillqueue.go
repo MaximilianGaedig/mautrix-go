@@ -129,6 +129,13 @@ const (
 				WHERE t.bridge_id = p.bridge_id AND t.portal_id = p.id AND t.portal_receiver = p.receiver
 			)
 	`
+	queuePositionQuery = `
+		SELECT
+			count(*) FILTER (WHERE next_dispatch_min_ts < $2),
+			count(*)
+		FROM backfill_task
+		WHERE bridge_id = $1 AND is_done = false AND queue_done = false AND user_login_id <> ''
+	`
 	deleteBackfillQueueQuery = `
 		DELETE FROM backfill_task
 		WHERE bridge_id = $1 AND portal_id = $2 AND portal_receiver = $3
@@ -180,6 +187,13 @@ func (btq *BackfillTaskQuery) RequestFullAll(ctx context.Context) error {
 		return err
 	}
 	return btq.Exec(ctx, requestFullBackfillAllQuery, btq.BridgeID, now)
+}
+
+// QueuePosition says how many chats are waiting in front of the task (the queue takes the one that
+// became due first), and how many are waiting in all.
+func (btq *BackfillTaskQuery) QueuePosition(ctx context.Context, task *BackfillTask) (ahead, total int, err error) {
+	err = btq.GetDB().QueryRow(ctx, queuePositionQuery, btq.BridgeID, task.NextDispatchMinTS.UnixNano()).Scan(&ahead, &total)
+	return
 }
 
 func (btq *BackfillTaskQuery) GetNext(ctx context.Context) (*BackfillTask, error) {
