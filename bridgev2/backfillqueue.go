@@ -323,8 +323,10 @@ func (br *Bridge) getPortalAndDoBackfillTask(ctx context.Context, task *database
 			}
 		}
 		if !foundLogin {
-			log.Debug().Msg("No logged in user logins found for backfill task")
-			task.NextDispatchMinTS = database.BackfillNextDispatchNever
+			// Logins that exist but aren't connected yet (the queue starts before they do) are not a
+			// reason to give up on the chat: try again shortly instead of never.
+			log.Debug().Msg("No logged in user logins found for backfill task, trying again in a few minutes")
+			task.NextDispatchMinTS = time.Now().Add(3 * time.Minute)
 			return false, nil
 		}
 	}
