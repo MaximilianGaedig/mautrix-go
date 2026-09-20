@@ -170,7 +170,14 @@ func (portal *Portal) computeBackfillStatus(ctx context.Context, source *UserLog
 	// network can no longer count it - Signal empties the backup archive as it imports it, so a chat that
 	// finished can never be counted again. It also saves asking networks that charge API calls to count.
 	if loadRemote && portal.MXID != "" {
-		if api, ok := portal.Bridge.Matrix.(MatrixConnectorWithArbitraryRoomState); ok {
+		if dp, ok := source.doublePuppetForStatus(ctx); ok {
+			var previous BackfillStatusContent
+			if err := dp.GetRoomAccountData(ctx, portal.MXID, BackfillStatusEventType.Type, &previous); err != nil {
+				zerolog.Ctx(ctx).Debug().Err(err).Msg("Failed to read the chat's last import status")
+			} else {
+				portal.rememberPrevious(&previous, status)
+			}
+		} else if api, ok := portal.Bridge.Matrix.(MatrixConnectorWithArbitraryRoomState); ok {
 			if evt, err := api.GetStateEvent(ctx, portal.MXID, BackfillStatusEventType, ""); err != nil {
 				zerolog.Ctx(ctx).Debug().Err(err).Msg("Failed to read the chat's last import status")
 			} else if evt != nil {
@@ -178,14 +185,7 @@ func (portal *Portal) computeBackfillStatus(ctx context.Context, source *UserLog
 				if err := json.Unmarshal(evt.Content.VeryRaw, &previous); err != nil {
 					zerolog.Ctx(ctx).Debug().Err(err).Msg("Failed to parse the chat's last import status")
 				} else {
-					portal.backfillStatus.lock.Lock()
-					// What the room already shows, so an identical status isn't written again.
-					portal.backfillStatus.last = &previous
-					if previous.RemoteTotal != nil {
-						portal.backfillStatus.remoteTotal = previous.RemoteTotal
-						status.RemoteTotal = previous.RemoteTotal
-					}
-					portal.backfillStatus.lock.Unlock()
+					portal.rememberPrevious(&previous, status)
 				}
 			}
 		}
@@ -251,13 +251,53 @@ func (portal *Portal) PublishBackfillStatus(ctx context.Context, source *UserLog
 			return
 		}
 	}
-	_, err = portal.Bridge.Bot.SendState(ctx, portal.MXID, BackfillStatusEventType, "", &event.Content{Parsed: status}, time.Time{})
-	if err != nil {
+	if err := portal.writeBackfillStatus(ctx, source, status); err != nil {
 		log.Err(err).Msg("Failed to send backfill status")
 		return
 	}
 	state.last = status
 	state.lastSent = time.Now()
+}
+
+// doublePuppetForStatus is the user's own intent, when the bridge has one and it can carry the status.
+func (ul *UserLogin) doublePuppetForStatus(ctx context.Context) (RoomAccountDataMatrixAPI, bool) {
+	if ul == nil {
+		return nil, false
+	}
+	dp, ok := ul.User.DoublePuppet(ctx).(RoomAccountDataMatrixAPI)
+	return dp, ok
+}
+
+// rememberPrevious carries what was published before into this run: the total the network gave then,
+// which it may not be able to give again, and the content itself so an identical status isn't rewritten.
+func (portal *Portal) rememberPrevious(previous, status *BackfillStatusContent) {
+	portal.backfillStatus.lock.Lock()
+	defer portal.backfillStatus.lock.Unlock()
+	portal.backfillStatus.last = previous
+	if previous.RemoteTotal != nil {
+		portal.backfillStatus.remoteTotal = previous.RemoteTotal
+		status.RemoteTotal = previous.RemoteTotal
+	}
+}
+
+// writeBackfillStatus puts the status where the user's clients will see it.
+//
+// It belongs to the user, not to the room: nobody else in a chat needs to know how much of its history
+// has been imported. Written as the user's own account data for the room it syncs just as well while
+// staying out of the room's timeline, where a status rewritten as an import progresses would otherwise
+// pile up in every client's copy of the room forever (measured at over a third of all replayed timeline
+// events) and leave the bridge bot with a read marker at the bottom of every chat.
+//
+// Without a double puppet the bridge cannot write the user's account data, so it falls back to the room
+// state the bot can write.
+func (portal *Portal) writeBackfillStatus(ctx context.Context, source *UserLogin, status *BackfillStatusContent) error {
+	if dp, ok := source.doublePuppetForStatus(ctx); ok {
+		return dp.SetRoomAccountData(ctx, portal.MXID, BackfillStatusEventType.Type, status)
+	}
+	_, err := portal.Bridge.Bot.SendState(
+		ctx, portal.MXID, BackfillStatusEventType, "", &event.Content{Parsed: status}, time.Time{},
+	)
+	return err
 }
 
 // PublishAllBackfillStatuses brings every portal's status event up to date: at startup, and after

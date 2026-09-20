@@ -230,6 +230,15 @@ type StreamOrderReadingMatrixAPI interface {
 	MarkStreamOrderRead(ctx context.Context, roomID id.RoomID, streamOrder int64, ts time.Time) error
 }
 
+// RoomAccountDataMatrixAPI is implemented by an intent that can write the user's own account data in a
+// room, which is where a bridge should keep what it wants to tell that user about the room: it syncs
+// like state but stays out of the room's timeline and out of everyone else's view.
+type RoomAccountDataMatrixAPI interface {
+	MatrixAPI
+	SetRoomAccountData(ctx context.Context, roomID id.RoomID, eventType string, content any) error
+	GetRoomAccountData(ctx context.Context, roomID id.RoomID, eventType string, into any) error
+}
+
 type MarkAsDMMatrixAPI interface {
 	MatrixAPI
 	MarkAsDM(ctx context.Context, roomID id.RoomID, otherUser id.UserID) error

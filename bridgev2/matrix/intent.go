@@ -44,6 +44,7 @@ type ASIntent struct {
 
 var _ bridgev2.MatrixAPI = (*ASIntent)(nil)
 var _ bridgev2.MarkAsDMMatrixAPI = (*ASIntent)(nil)
+var _ bridgev2.RoomAccountDataMatrixAPI = (*ASIntent)(nil)
 
 func (as *ASIntent) SendMessage(ctx context.Context, roomID id.RoomID, eventType event.Type, content *event.Content, extra *bridgev2.MatrixSendExtra) (*mautrix.RespSendEvent, error) {
 	if extra == nil {
@@ -167,6 +168,14 @@ func (as *ASIntent) MarkRead(ctx context.Context, roomID id.RoomID, eventID id.E
 		}
 	}
 	return
+}
+
+func (as *ASIntent) SetRoomAccountData(ctx context.Context, roomID id.RoomID, eventType string, content any) error {
+	return as.Matrix.SetRoomAccountData(ctx, roomID, eventType, content)
+}
+
+func (as *ASIntent) GetRoomAccountData(ctx context.Context, roomID id.RoomID, eventType string, into any) error {
+	return as.Matrix.GetRoomAccountData(ctx, roomID, eventType, into)
 }
 
 func (as *ASIntent) MarkUnread(ctx context.Context, roomID id.RoomID, unread bool) error {
