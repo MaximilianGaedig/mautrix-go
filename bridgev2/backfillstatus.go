@@ -65,6 +65,8 @@ type backfillStatusState struct {
 	last        *BackfillStatusContent
 	lastSent    time.Time
 	remoteTotal *int
+	// When the network was last asked for the total, so a failing count isn't retried on every update.
+	remoteTriedAt time.Time
 }
 
 // How often the count may be refreshed while a backfill is running; state changes go out at once.
@@ -119,7 +121,16 @@ func (portal *Portal) computeBackfillStatus(ctx context.Context, source *UserLog
 	portal.backfillStatus.lock.Lock()
 	status.RemoteTotal = portal.backfillStatus.remoteTotal
 	portal.backfillStatus.lock.Unlock()
-	if withRemote && source != nil {
+	// The total is what makes "x of y" and a time estimate possible, so it is fetched once while the
+	// import runs (and again, if asked, when it ends), not on every update.
+	portal.backfillStatus.lock.Lock()
+	needTotal := status.RemoteTotal == nil && status.State == BackfillStateRunning &&
+		time.Since(portal.backfillStatus.remoteTriedAt) > 10*time.Minute
+	if needTotal || withRemote {
+		portal.backfillStatus.remoteTriedAt = time.Now()
+	}
+	portal.backfillStatus.lock.Unlock()
+	if (withRemote || needTotal) && source != nil {
 		if counter, ok := source.Client.(BackfillCountingNetworkAPI); ok {
 			if total, err := counter.CountRemoteMessages(ctx, portal); err != nil {
 				zerolog.Ctx(ctx).Debug().Err(err).Msg("Failed to count the chat's messages on the network")
