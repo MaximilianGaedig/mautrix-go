@@ -90,3 +90,57 @@ var CommandBackfillAll = &FullHandler{
 	},
 	RequiresAdmin: true,
 }
+
+var CommandAuditBackfill = &FullHandler{
+	Func: func(ce *Event) {
+		ce.Reply("Checking every chat. Asking the network for each chat's message count takes a while.")
+		go func() {
+			audit, err := ce.Bridge.AuditBackfill(ce.Bridge.BackgroundCtx, true)
+			if err != nil {
+				ce.Reply("The check failed: %v", err)
+				return
+			}
+			var sb strings.Builder
+			if audit.RemoteChats >= 0 {
+				fmt.Fprintf(&sb, "**Chats:** %d on %s, %d bridged", audit.RemoteChats, ce.Bridge.Network.GetName().DisplayName, audit.WithRoom)
+				if audit.WithRoom < audit.RemoteChats {
+					fmt.Fprintf(&sb, " (**%d missing**)", audit.RemoteChats-audit.WithRoom)
+				}
+				sb.WriteString("\n\n")
+			} else {
+				fmt.Fprintf(&sb, "**Chats bridged:** %d (the network can't say how many exist)\n\n", audit.WithRoom)
+			}
+			fmt.Fprintf(&sb, "**History:** %d complete, %d importing, %d need a request, %d have nothing older to give\n\n",
+				audit.ByState[bridgev2.BackfillStateComplete], audit.ByState[bridgev2.BackfillStateRunning],
+				audit.ByState[bridgev2.BackfillStateManual], audit.ByState[bridgev2.BackfillStateUnavailable])
+			fmt.Fprintf(&sb, "**Messages:** %d imported", audit.BridgedMessages)
+			if audit.Counted > 0 {
+				fmt.Fprintf(&sb, "; the network counts %d in the %d chats it can count", audit.RemoteMessages, audit.Counted)
+			}
+			sb.WriteString("\n\n")
+			if len(audit.Incomplete) == 0 {
+				sb.WriteString("Nothing is missing.")
+			} else {
+				fmt.Fprintf(&sb, "**%d chats not fully imported:**\n", len(audit.Incomplete))
+				for i, chat := range audit.Incomplete {
+					if i == 30 {
+						fmt.Fprintf(&sb, "- …and %d more\n", len(audit.Incomplete)-30)
+						break
+					}
+					if chat.RemoteTotal != nil {
+						fmt.Fprintf(&sb, "- `%s`: %d of %d (%s)\n", chat.PortalID, chat.Bridged, *chat.RemoteTotal, chat.State)
+					} else {
+						fmt.Fprintf(&sb, "- `%s`: %d imported (%s)\n", chat.PortalID, chat.Bridged, chat.State)
+					}
+				}
+			}
+			ce.Reply("%s", sb.String())
+		}()
+	},
+	Name: "audit-backfill",
+	Help: HelpMeta{
+		Section:     HelpSectionAdmin,
+		Description: "Check that every chat and message of the account has been imported",
+	},
+	RequiresAdmin: true,
+}

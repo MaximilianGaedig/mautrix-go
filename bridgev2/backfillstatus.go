@@ -195,3 +195,95 @@ func (portal *Portal) RequestFullBackfill(ctx context.Context, login networkid.U
 	portal.Bridge.WakeupBackfillQueue()
 	return nil
 }
+
+// ChatCountingNetworkAPI is implemented by network connectors that can say how many chats the account
+// has on the network, which lets the bridge check that every one of them has a room.
+type ChatCountingNetworkAPI interface {
+	NetworkAPI
+	// CountRemoteChats returns how many chats the account has on the network.
+	CountRemoteChats(ctx context.Context) (int, error)
+}
+
+// BackfillAudit is a summary of how completely a bridge has imported its account's chats.
+type BackfillAudit struct {
+	// Chats the network says the account has (-1 if the connector can't say), and portals with a room.
+	RemoteChats int
+	Portals     int
+	WithRoom    int
+	// Portals by import state.
+	ByState map[string]int
+	// Messages imported, and the network's own total across the chats that reported one.
+	BridgedMessages int
+	RemoteMessages  int
+	// Chats whose network total is known, and how many of those have fewer imported than the network has.
+	Counted    int
+	Incomplete []AuditChat
+}
+
+// AuditChat is one chat that hasn't been fully imported.
+type AuditChat struct {
+	PortalID    string
+	State       string
+	Bridged     int
+	RemoteTotal *int
+}
+
+// AuditBackfill checks every portal of the bridge: the state of its import and, when the network can
+// say, whether as many messages were imported as the chat has. withRemote asks the network per chat,
+// which takes a request each.
+func (br *Bridge) AuditBackfill(ctx context.Context, withRemote bool) (*BackfillAudit, error) {
+	audit := &BackfillAudit{ByState: map[string]int{}, RemoteChats: -1}
+	portals, err := br.DB.Portal.GetAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+	audit.Portals = len(portals)
+	for _, dbPortal := range portals {
+		if dbPortal.MXID == "" {
+			continue
+		}
+		audit.WithRoom++
+		portal, err := br.GetExistingPortalByKey(ctx, dbPortal.PortalKey)
+		if err != nil || portal == nil {
+			continue
+		}
+		var source *UserLogin
+		if task, err := br.DB.BackfillTask.GetNextForPortal(ctx, portal.PortalKey, true); err == nil && task != nil && task.UserLoginID != "" {
+			source, _ = br.GetExistingUserLoginByID(ctx, task.UserLoginID)
+		}
+		status, err := portal.computeBackfillStatus(ctx, source, withRemote)
+		if err != nil {
+			continue
+		}
+		audit.ByState[status.State]++
+		audit.BridgedMessages += status.BridgedMessages
+		incomplete := status.State != BackfillStateComplete && status.State != BackfillStateUnavailable
+		if status.RemoteTotal != nil {
+			audit.Counted++
+			audit.RemoteMessages += *status.RemoteTotal
+			// The network counts service messages the bridge doesn't import, so a few fewer is normal;
+			// a chat is short when it is missing more than one in twenty.
+			if status.BridgedMessages*20 < *status.RemoteTotal*19 {
+				incomplete = true
+			}
+		}
+		if incomplete {
+			audit.Incomplete = append(audit.Incomplete, AuditChat{
+				PortalID: string(portal.ID), State: status.State, Bridged: status.BridgedMessages, RemoteTotal: status.RemoteTotal,
+			})
+		}
+	}
+	if withRemote {
+		for _, login := range br.GetAllCachedUserLogins() {
+			if counter, ok := login.Client.(ChatCountingNetworkAPI); ok {
+				if n, err := counter.CountRemoteChats(ctx); err == nil {
+					if audit.RemoteChats < 0 {
+						audit.RemoteChats = 0
+					}
+					audit.RemoteChats += n
+				}
+			}
+		}
+	}
+	return audit, nil
+}
