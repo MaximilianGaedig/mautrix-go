@@ -404,6 +404,7 @@ func (br *Bridge) StartLoginsForUsers(ctx context.Context, users []*User) {
 	if !br.Background {
 		go br.RunBackfillQueue()
 		go br.PublishAllBackfillStatuses(br.BackgroundCtx)
+		go br.MarkAllDMs(br.BackgroundCtx)
 	}
 
 	br.Log.Info().Msg("Bridge started")
