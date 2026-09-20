@@ -46,6 +46,12 @@ type BackfillStatusContent struct {
 	RemoteTotal *int `json:"remote_total,omitempty"`
 	// How many batches of older history have been imported so far.
 	Batches int `json:"batches"`
+	// Whether this chat is being imported right now (a batch was fetched in the last two minutes), as
+	// opposed to waiting its turn in the queue. Only meaningful in the running state.
+	Active bool `json:"active,omitempty"`
+	// Messages imported per minute since this import was first seen running, once that is long enough
+	// to mean something.
+	RatePerMinute float64 `json:"rate_per_min,omitempty"`
 	// What to send in the room to ask for the rest: "<prefix> backfill".
 	CommandPrefix string `json:"command_prefix"`
 	Network       string `json:"network"`
@@ -67,6 +73,9 @@ type backfillStatusState struct {
 	remoteTotal *int
 	// When the network was last asked for the total, so a failing count isn't retried on every update.
 	remoteTriedAt time.Time
+	// Where the import's pace is measured from: the first time it was seen running, and its count then.
+	rateSince time.Time
+	rateCount int
 }
 
 // How often the count may be refreshed while a backfill is running; state changes go out at once.
@@ -116,7 +125,23 @@ func (portal *Portal) computeBackfillStatus(ctx context.Context, source *UserLog
 	default:
 		status.State = BackfillStateRunning
 		status.Batches = task.BatchCount
+		status.Active = !task.DispatchedAt.IsZero() && time.Since(task.DispatchedAt) < 2*time.Minute
 	}
+
+	// Pace: measured from when this process first saw the chat importing, and only once that is long
+	// enough (and moved enough) to be a rate; a chat that stops being imported starts over.
+	portal.backfillStatus.lock.Lock()
+	if status.State == BackfillStateRunning && status.Active {
+		if portal.backfillStatus.rateSince.IsZero() {
+			portal.backfillStatus.rateSince = time.Now()
+			portal.backfillStatus.rateCount = count
+		} else if elapsed := time.Since(portal.backfillStatus.rateSince); elapsed >= time.Minute && count > portal.backfillStatus.rateCount {
+			status.RatePerMinute = float64(count-portal.backfillStatus.rateCount) / elapsed.Minutes()
+		}
+	} else if status.State != BackfillStateRunning {
+		portal.backfillStatus.rateSince = time.Time{}
+	}
+	portal.backfillStatus.lock.Unlock()
 
 	portal.backfillStatus.lock.Lock()
 	status.RemoteTotal = portal.backfillStatus.remoteTotal
@@ -168,7 +193,7 @@ func (portal *Portal) PublishBackfillStatus(ctx context.Context, source *UserLog
 	defer state.lock.Unlock()
 	if !force && state.last != nil {
 		unchanged := state.last.State == status.State && state.last.BridgedMessages == status.BridgedMessages &&
-			state.last.Batches == status.Batches
+			state.last.Batches == status.Batches && state.last.Active == status.Active
 		recent := time.Since(state.lastSent) < backfillStatusMinInterval
 		if unchanged || (recent && state.last.State == status.State) {
 			return
