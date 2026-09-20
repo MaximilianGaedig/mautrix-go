@@ -103,6 +103,7 @@ type Portal struct {
 	eventIdx   int
 
 	backfillLock             sync.Mutex
+	backfillStatus           backfillStatusState
 	forwardBackfillLock      sync.Mutex
 	nextBackfillDoneCallback func(error)
 }
@@ -5232,7 +5233,8 @@ func (portal *Portal) UpdateInfo(ctx context.Context, info *ChatInfo, source *Us
 		if err != nil {
 			zerolog.Ctx(ctx).Err(err).Msg("Failed to ensure backfill queue task exists")
 		}
-		// TODO wake up backfill queue if task was just created
+		portal.Bridge.WakeupBackfillQueue()
+		go portal.PublishBackfillStatus(portal.Bridge.BackgroundCtx, source, false)
 	}
 	if info.ExtraUpdates != nil {
 		changed = info.ExtraUpdates(ctx, portal) || changed

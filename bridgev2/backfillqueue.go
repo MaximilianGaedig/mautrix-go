@@ -194,6 +194,9 @@ func (mt *ManualBackfill) Do(ctx context.Context) {
 			log.Err(err).Msg("Failed to update backfill task in database after backfill")
 		}
 	}
+	if task != nil {
+		mt.Portal.Bridge.publishBackfillStatusForTask(ctx, task)
+	}
 }
 
 func (br *Bridge) DoBackfillTask(ctx context.Context, task *database.BackfillTask) {
@@ -239,6 +242,17 @@ func (br *Bridge) DoBackfillTask(ctx context.Context, task *database.BackfillTas
 			time.Sleep(BackfillQueueErrorBackoff)
 		}
 	}
+	br.publishBackfillStatusForTask(ctx, task)
+}
+
+func (br *Bridge) publishBackfillStatusForTask(ctx context.Context, task *database.BackfillTask) {
+	portal, err := br.GetExistingPortalByKey(ctx, task.PortalKey)
+	if err != nil || portal == nil || portal.MXID == "" {
+		return
+	}
+	login, _ := br.GetExistingUserLoginByID(ctx, task.UserLoginID)
+	// The network is asked for its total only when the chat is finished: that is when it matters.
+	portal.PublishBackfillStatus(ctx, login, task.IsDone)
 }
 
 func (portal *Portal) deleteBackfillQueueTaskIfRoomDoesNotExist(ctx context.Context) bool {
