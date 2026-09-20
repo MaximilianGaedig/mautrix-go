@@ -9,12 +9,14 @@ package bridgev2
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"math"
 	"sync"
 	"time"
 
 	"github.com/rs/zerolog"
 
+	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 )
@@ -173,7 +175,10 @@ func (portal *Portal) computeBackfillStatus(ctx context.Context, source *UserLog
 		if dp, ok := source.doublePuppetForStatus(ctx); ok {
 			var previous BackfillStatusContent
 			if err := dp.GetRoomAccountData(ctx, portal.MXID, BackfillStatusEventType.Type, &previous); err != nil {
-				zerolog.Ctx(ctx).Debug().Err(err).Msg("Failed to read the chat's last import status")
+				// A chat the bridge has not described before simply has none, which is not a failure.
+				if !errors.Is(err, mautrix.MNotFound) {
+					zerolog.Ctx(ctx).Debug().Err(err).Msg("Failed to read the chat's last import status")
+				}
 			} else {
 				portal.rememberPrevious(&previous, status)
 			}
