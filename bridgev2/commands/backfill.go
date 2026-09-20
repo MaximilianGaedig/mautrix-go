@@ -20,7 +20,7 @@ var CommandBackfill = &FullHandler{
 	Help: HelpMeta{
 		Section:     HelpSectionChats,
 		Description: "Import this chat's whole history (`backfill`), or show how much of it has been imported (`backfill status`)",
-		Args:        "[status]",
+		Args:        "[status|skip]",
 	},
 	RequiresPortal: true,
 	RequiresLogin:  true,
@@ -33,6 +33,8 @@ func backfillStatusText(status *bridgev2.BackfillStatusContent) string {
 		sb.WriteString("All of this chat's history has been imported.")
 	case bridgev2.BackfillStateRunning:
 		sb.WriteString("Older history is still being imported.")
+	case bridgev2.BackfillStateSkipped:
+		sb.WriteString("Importing this chat's older history was skipped. Send `$cmdprefix backfill` to import it.")
 	case bridgev2.BackfillStateManual:
 		sb.WriteString("There is older history that needs a manual request to import. Send `$cmdprefix backfill`.")
 	default:
@@ -55,6 +57,19 @@ func fnBackfill(ce *Event) {
 		if taskLogin, _ := ce.Bridge.GetExistingUserLoginByID(ce.Ctx, task.UserLoginID); taskLogin != nil {
 			login = taskLogin
 		}
+	}
+	if len(ce.Args) > 0 && strings.EqualFold(ce.Args[0], "skip") {
+		if err := ce.Bridge.DB.BackfillTask.EnsureExists(ce.Ctx, ce.Portal.PortalKey, login.ID); err != nil {
+			ce.Reply("Failed to skip the import: %v", err)
+			return
+		}
+		if err := ce.Bridge.DB.BackfillTask.Skip(ce.Ctx, ce.Portal.PortalKey, login.ID); err != nil {
+			ce.Reply("Failed to skip the import: %v", err)
+			return
+		}
+		go ce.Portal.PublishBackfillStatus(ce.Bridge.BackgroundCtx, login, true)
+		ce.Reply("Older history of this chat will not be imported. Send `$cmdprefix backfill` to import it after all.")
+		return
 	}
 	if len(ce.Args) > 0 && strings.EqualFold(ce.Args[0], "status") {
 		status, err := ce.Portal.ComputeBackfillStatus(ce.Ctx, login, true)
