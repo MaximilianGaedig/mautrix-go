@@ -91,6 +91,9 @@ func (br *Bridge) RunBackfillQueue() {
 		cancel()
 	}()
 	batchDelay := time.Duration(br.Config.Backfill.Queue.BatchDelay) * time.Second
+	if err := br.DB.BackfillTask.ReclaimDispatched(ctx, time.Now()); err != nil {
+		log.Err(err).Msg("Failed to reclaim backfill tasks left dispatched by a previous run")
+	}
 	log.Info().Stringer("batch_delay", batchDelay).Msg("Backfill queue starting")
 	noTasksFoundCount := 0
 	for {

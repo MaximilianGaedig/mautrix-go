@@ -72,6 +72,11 @@ const (
 				completed_at=excluded.completed_at,
 				next_dispatch_min_ts=excluded.next_dispatch_min_ts
 	`
+	reclaimDispatchedBackfillsQuery = `
+		UPDATE backfill_task SET next_dispatch_min_ts=$2
+		WHERE bridge_id = $1 AND dispatched_at IS NOT NULL AND completed_at IS NULL
+			AND is_done = false AND queue_done = false AND next_dispatch_min_ts > $2
+	`
 	rescheduleBackfillQuery = `
 		UPDATE backfill_task SET next_dispatch_min_ts=$4
 		WHERE bridge_id = $1 AND portal_id = $2 AND portal_receiver = $3
@@ -186,6 +191,14 @@ func (btq *BackfillTaskQuery) Reschedule(ctx context.Context, bq *BackfillTask, 
 		ctx, rescheduleBackfillQuery,
 		bq.BridgeID, bq.PortalKey.ID, bq.PortalKey.Receiver, bq.NextDispatchMinTS.UnixNano(),
 	)
+}
+
+// ReclaimDispatched brings forward every task this bridge dispatched but never finished. Dispatching a
+// task reserves it for an hour so a second runner won't start it again, and nothing gives that reservation
+// back when the process stops mid-task: the chat would then sit out the rest of the hour after every
+// restart. A bridge that has just started has no task of its own running, so it can take them all back.
+func (btq *BackfillTaskQuery) ReclaimDispatched(ctx context.Context, due time.Time) error {
+	return btq.Exec(ctx, reclaimDispatchedBackfillsQuery, btq.BridgeID, due.UnixNano())
 }
 
 func (btq *BackfillTaskQuery) Update(ctx context.Context, bq *BackfillTask) error {
