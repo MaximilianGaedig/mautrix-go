@@ -338,6 +338,7 @@ func (ul *UserLogin) Delete(ctx context.Context, state status.BridgeState, opts 
 	}
 	if state.StateEvent != "" {
 		ul.BridgeState.Send(state)
+		ul.BridgeState.sendFinalLoginState(ctx, state)
 	}
 	ul.BridgeState.Destroy()
 	ul.BridgeState = nil
