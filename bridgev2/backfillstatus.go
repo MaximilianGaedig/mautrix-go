@@ -8,6 +8,7 @@ package bridgev2
 
 import (
 	"context"
+	"math"
 	"sync"
 	"time"
 
@@ -56,7 +57,8 @@ type BackfillStatusContent struct {
 	QueueSize  int `json:"queue_size,omitempty"`
 	// Messages imported per minute since this import was first seen running, once that is long enough
 	// to mean something.
-	RatePerMinute float64 `json:"rate_per_min,omitempty"`
+	// Messages per minute, a whole number: Matrix event content may not hold floats (servers answer 400).
+	RatePerMinute int64 `json:"rate_per_min,omitempty"`
 	// What to send in the room to ask for the rest: "<prefix> backfill".
 	CommandPrefix string `json:"command_prefix"`
 	Network       string `json:"network"`
@@ -149,7 +151,7 @@ func (portal *Portal) computeBackfillStatus(ctx context.Context, source *UserLog
 			portal.backfillStatus.rateSince = time.Now()
 			portal.backfillStatus.rateCount = count
 		} else if elapsed := time.Since(portal.backfillStatus.rateSince); elapsed >= time.Minute && count > portal.backfillStatus.rateCount {
-			status.RatePerMinute = float64(count-portal.backfillStatus.rateCount) / elapsed.Minutes()
+			status.RatePerMinute = int64(math.Round(float64(count-portal.backfillStatus.rateCount) / elapsed.Minutes()))
 		}
 	} else if status.State != BackfillStateRunning {
 		portal.backfillStatus.rateSince = time.Time{}
