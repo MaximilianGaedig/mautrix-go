@@ -315,6 +315,7 @@ func (bsq *BridgeStateQueue) immediateSendBridgeState(state status.BridgeState) 
 
 	bgCtx := bsq.login.Log.WithContext(bsq.bridge.BackgroundCtx)
 	bsq.sendNotice(bgCtx, state, false)
+	bsq.publishLoginState(bgCtx, state)
 
 	retryIn := 2
 	for {
