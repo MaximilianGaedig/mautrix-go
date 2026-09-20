@@ -90,6 +90,7 @@ func (portal *Portal) doForwardBackfill(ctx context.Context, source *UserLogin, 
 	if err != nil {
 		log.Err(err).Msg("Failed to send forward backfill")
 	}
+	portal.PublishBackfillStatus(ctx, source, false)
 }
 
 var errNoMessagesLeftAfterCutoff = errors.New("no messages left to backfill after cutting off too new messages")
@@ -531,6 +532,24 @@ func (portal *Portal) sendBatch(ctx context.Context, source *UserLogin, messages
 		DBMessages:       make([]*database.Message, 0, len(messages)),
 		DBReactions:      make([]*database.Reaction, 0),
 		Disappear:        make([]*database.DisappearingMessage, 0),
+	}
+	// Senders of imported history need to be in the room, or clients can't show who they are.
+	joined := make(map[id.UserID]struct{})
+	for _, msg := range messages {
+		if len(msg.Parts) == 0 {
+			continue
+		}
+		intent, ok := portal.GetIntentFor(ctx, msg.Sender, source, RemoteEventMessage)
+		if !ok {
+			continue
+		}
+		if _, done := joined[intent.GetMXID()]; done {
+			continue
+		}
+		joined[intent.GetMXID()] = struct{}{}
+		if err := intent.EnsureJoined(ctx, portal.MXID); err != nil {
+			zerolog.Ctx(ctx).Warn().Err(err).Stringer("sender", intent.GetMXID()).Msg("Failed to join a sender before importing their history")
+		}
 	}
 	for _, msg := range messages {
 		portal.compileBatchMessage(ctx, source, msg, out, inThread)

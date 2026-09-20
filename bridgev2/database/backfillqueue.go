@@ -102,6 +102,16 @@ const (
 		FROM backfill_task
 		WHERE bridge_id = $1 AND portal_id = $2 AND portal_receiver = $3
 	`
+	requestFullBackfillQuery = `
+		UPDATE backfill_task
+		SET is_done = false, queue_done = false, next_dispatch_min_ts = $5
+		WHERE bridge_id = $1 AND portal_id = $2 AND portal_receiver = $3 AND user_login_id = $4
+	`
+	requestFullBackfillAllQuery = `
+		UPDATE backfill_task
+		SET is_done = false, queue_done = false, next_dispatch_min_ts = $2
+		WHERE bridge_id = $1 AND user_login_id <> ''
+	`
 	deleteBackfillQueueQuery = `
 		DELETE FROM backfill_task
 		WHERE bridge_id = $1 AND portal_id = $2 AND portal_receiver = $3
@@ -138,6 +148,17 @@ func (btq *BackfillTaskQuery) Update(ctx context.Context, bq *BackfillTask) erro
 
 func (btq *BackfillTaskQuery) MarkNotDone(ctx context.Context, portalKey networkid.PortalKey, userLoginID networkid.UserLoginID) error {
 	return btq.Exec(ctx, markBackfillTaskNotDoneQuery, btq.BridgeID, portalKey.ID, portalKey.Receiver, userLoginID)
+}
+
+// RequestFull marks the portal's backfill as not finished and due now, so the queue carries on to
+// the start of the chat's history.
+func (btq *BackfillTaskQuery) RequestFull(ctx context.Context, portalKey networkid.PortalKey, userLoginID networkid.UserLoginID) error {
+	return btq.Exec(ctx, requestFullBackfillQuery, btq.BridgeID, portalKey.ID, portalKey.Receiver, userLoginID, time.Now().UnixNano())
+}
+
+// RequestFullAll does the same for every portal's task.
+func (btq *BackfillTaskQuery) RequestFullAll(ctx context.Context) error {
+	return btq.Exec(ctx, requestFullBackfillAllQuery, btq.BridgeID, time.Now().UnixNano())
 }
 
 func (btq *BackfillTaskQuery) GetNext(ctx context.Context) (*BackfillTask, error) {
