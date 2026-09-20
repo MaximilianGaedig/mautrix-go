@@ -21,6 +21,10 @@ import (
 
 const BackfillMinBackoffAfterRoomCreate = 1 * time.Minute
 const BackfillQueueErrorBackoff = 1 * time.Minute
+
+// How long a chat waits for another go after its import failed, e.g. when the network answered with a
+// transient error. Without it the chat would wait out the hour that dispatching reserves for it.
+const BackfillRetryBackoff = 2 * time.Minute
 const BackfillQueueMaxEmptyBackoff = 10 * time.Minute
 
 func (br *Bridge) WakeupBackfillQueue(manualTask ...*ManualBackfill) {
@@ -223,6 +227,13 @@ func (br *Bridge) DoBackfillTask(ctx context.Context, task *database.BackfillTas
 	if err != nil {
 		log.Err(err).Msg("Failed to do backfill task")
 		updateTask = errors.Is(err, errNoMessagesLeftAfterCutoff)
+		if !updateTask {
+			// The task keeps the hour-long guard dispatching gave it, which is meant for a task still
+			// running. This one is not, so let it be picked up again shortly instead.
+			if rescheduleErr := br.DB.BackfillTask.Reschedule(ctx, task, BackfillRetryBackoff); rescheduleErr != nil {
+				log.Err(rescheduleErr).Msg("Failed to reschedule the backfill task that failed")
+			}
+		}
 		time.Sleep(BackfillQueueErrorBackoff)
 	} else if completed {
 		log.Info().
