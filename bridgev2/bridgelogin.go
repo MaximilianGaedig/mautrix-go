@@ -36,6 +36,16 @@ type BridgeLoginContent struct {
 	UpdatedTS     int64  `json:"updated_ts"`
 }
 
+// sendFinalLoginState records a login's last state before its queue is torn down. Send() only queues,
+// and deleting a login closes that queue straight after, so the state most worth having - that the
+// bridge is logged out - is the one most likely to be dropped.
+func (bsq *BridgeStateQueue) sendFinalLoginState(ctx context.Context, state status.BridgeState) {
+	if bsq == nil {
+		return
+	}
+	bsq.publishLoginState(ctx, state.Fill(bsq.login))
+}
+
 // publishLoginState records the login's connection state in the user's management room.
 func (bsq *BridgeStateQueue) publishLoginState(ctx context.Context, state status.BridgeState) {
 	login := bsq.login
