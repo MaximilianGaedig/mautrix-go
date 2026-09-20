@@ -29,6 +29,8 @@ const (
 	BackfillStateRunning = "running"
 	// BackfillStateManual: importing more needs a manual request (the network's fetches are slow).
 	BackfillStateManual = "manual"
+	// BackfillStateSkipped: the user chose not to import this chat's older history.
+	BackfillStateSkipped = "skipped"
 	// BackfillStateUnavailable: the network offers no way to fetch this chat's older history, so
 	// what was imported is what exists.
 	BackfillStateUnavailable = "unavailable"
@@ -121,6 +123,9 @@ func (portal *Portal) computeBackfillStatus(ctx context.Context, source *UserLog
 		}
 	case task.IsDone:
 		status.State = BackfillStateComplete
+		status.Batches = task.BatchCount
+	case task.BatchCount == -2:
+		status.State = BackfillStateSkipped
 		status.Batches = task.BatchCount
 	case task.QueueDone:
 		status.State = BackfillStateManual
@@ -311,7 +316,7 @@ func (br *Bridge) AuditBackfill(ctx context.Context, withRemote bool) (*Backfill
 		}
 		audit.ByState[status.State]++
 		audit.BridgedMessages += status.BridgedMessages
-		incomplete := status.State != BackfillStateComplete && status.State != BackfillStateUnavailable
+		incomplete := status.State != BackfillStateComplete && status.State != BackfillStateUnavailable && status.State != BackfillStateSkipped
 		if status.RemoteTotal != nil {
 			audit.Counted++
 			audit.RemoteMessages += *status.RemoteTotal

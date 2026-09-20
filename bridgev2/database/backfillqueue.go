@@ -92,7 +92,7 @@ const (
 			bridge_id, portal_id, portal_receiver, user_login_id, batch_count, is_done, queue_done,
 			cursor, oldest_message_id, dispatched_at, completed_at, next_dispatch_min_ts
 		FROM backfill_task
-		WHERE bridge_id = $1 AND next_dispatch_min_ts < $2 AND is_done = false AND queue_done = false AND user_login_id <> ''
+		WHERE bridge_id = $1 AND next_dispatch_min_ts < $2 AND is_done = false AND queue_done = false AND user_login_id <> '' AND batch_count <> -2
 		ORDER BY next_dispatch_min_ts LIMIT 1
 	`
 	getNextBackfillQueryForPortal = `
@@ -104,13 +104,14 @@ const (
 	`
 	requestFullBackfillQuery = `
 		UPDATE backfill_task
-		SET is_done = false, queue_done = false, next_dispatch_min_ts = $5
+		SET is_done = false, queue_done = false, next_dispatch_min_ts = $5,
+			batch_count = CASE WHEN batch_count = -2 THEN 0 ELSE batch_count END
 		WHERE bridge_id = $1 AND portal_id = $2 AND portal_receiver = $3 AND user_login_id = $4
 	`
 	requestFullBackfillAllQuery = `
 		UPDATE backfill_task
 		SET is_done = false, queue_done = false, next_dispatch_min_ts = $2
-		WHERE bridge_id = $1 AND user_login_id <> ''
+		WHERE bridge_id = $1 AND user_login_id <> '' AND batch_count <> -2
 	`
 	// Chats whose room exists but which never got a task (nothing refreshed their info since backfill
 	// was turned on) get one, through the login that has them.
@@ -134,7 +135,13 @@ const (
 			count(*) FILTER (WHERE next_dispatch_min_ts < $2),
 			count(*)
 		FROM backfill_task
-		WHERE bridge_id = $1 AND is_done = false AND queue_done = false AND user_login_id <> ''
+		WHERE bridge_id = $1 AND is_done = false AND queue_done = false AND user_login_id <> '' AND batch_count <> -2
+	`
+	// A skipped chat is a task with this batch count: nothing else changes it, and the queue passes it by.
+	skipBackfillQuery = `
+		UPDATE backfill_task
+		SET batch_count = -2, is_done = false, queue_done = false
+		WHERE bridge_id = $1 AND portal_id = $2 AND portal_receiver = $3 AND user_login_id = $4
 	`
 	deleteBackfillQueueQuery = `
 		DELETE FROM backfill_task
@@ -187,6 +194,12 @@ func (btq *BackfillTaskQuery) RequestFullAll(ctx context.Context) error {
 		return err
 	}
 	return btq.Exec(ctx, requestFullBackfillAllQuery, btq.BridgeID, now)
+}
+
+// Skip takes the chat out of the queue for good, until it is asked for again with RequestFull: its task
+// stays but the queue passes it by.
+func (btq *BackfillTaskQuery) Skip(ctx context.Context, portalKey networkid.PortalKey, userLoginID networkid.UserLoginID) error {
+	return btq.Exec(ctx, skipBackfillQuery, btq.BridgeID, portalKey.ID, portalKey.Receiver, userLoginID)
 }
 
 // QueuePosition says how many chats are waiting in front of the task (the queue takes the one that
