@@ -176,11 +176,10 @@ func (portal *Portal) doBackwardsBackfill(ctx context.Context, source *UserLogin
 		if resp.CompleteCallback != nil {
 			resp.CompleteCallback()
 		}
-		// Hack to handle some migrated portals where message timestamps are unknown.
-		// They can't be backfilled further, so just mark them as done.
-		if firstMessage != nil && firstMessage.Timestamp.Unix() == 0 {
-			task.IsDone = true
-			task.QueueDone = true
+		// A migrated portal (message times unknown) whose whole batch was already bridged: carry on with
+		// the next batch from the cursor instead of calling the chat finished. The task is done only
+		// when the network says there is nothing older (HasMore false, handled above).
+		if firstMessage != nil && firstMessage.Timestamp.Unix() <= 0 {
 			return false, nil
 		}
 		return false, errNoMessagesLeftAfterCutoff
@@ -250,7 +249,16 @@ func (portal *Portal) cutoffMessages(ctx context.Context, messages []*BackfillMe
 	if lastMessage == nil {
 		return messages
 	}
-	if forward {
+	// Portals migrated from older bridges have messages with no known time. Comparing against zero
+	// would cut off everything the network returns, so such an anchor only gets duplicates removed:
+	// the connector pages by the network's own ordering, and the database says what is already here.
+	unknownTimestamp := lastMessage.Timestamp.Unix() <= 0
+	if unknownTimestamp {
+		aggressiveDedup = true
+	}
+	if unknownTimestamp {
+		// nothing to cut by time
+	} else if forward {
 		cutoff := -1
 		var cutoffIDs []networkid.MessageID
 		for i, msg := range messages {
@@ -298,7 +306,7 @@ func (portal *Portal) cutoffMessages(ctx context.Context, messages []*BackfillMe
 			if err != nil {
 				zerolog.Ctx(ctx).Err(err).Str("message_id", string(msg.ID)).Msg("Failed to check for existing message")
 			} else if existingMsg != nil {
-				zerolog.Ctx(ctx).Err(err).
+				zerolog.Ctx(ctx).Trace().
 					Str("message_id", string(msg.ID)).
 					Time("message_ts", msg.Timestamp).
 					Str("message_sender", string(msg.Sender.Sender)).
