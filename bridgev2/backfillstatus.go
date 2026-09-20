@@ -237,7 +237,9 @@ func (br *Bridge) PublishAllBackfillStatuses(ctx context.Context) {
 		if task, err := br.DB.BackfillTask.GetNextForPortal(ctx, portal.PortalKey, true); err == nil && task != nil && task.UserLoginID != "" {
 			source, _ = br.GetExistingUserLoginByID(ctx, task.UserLoginID)
 		}
-		portal.PublishBackfillStatus(ctx, source, false)
+		// Ask the network for the chat's total too (when the connector can say), so "x of y" is there from
+		// the start and for chats that finished before totals were tracked.
+		portal.PublishBackfillStatus(ctx, source, true)
 		time.Sleep(50 * time.Millisecond)
 	}
 	br.Log.Info().Int("portals", len(portals)).Msg("Published backfill statuses")
