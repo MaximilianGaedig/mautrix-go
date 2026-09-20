@@ -49,6 +49,9 @@ type BackfillStatusContent struct {
 	// Whether this chat is being imported right now (a batch was fetched in the last two minutes), as
 	// opposed to waiting its turn in the queue. Only meaningful in the running state.
 	Active bool `json:"active,omitempty"`
+	// For a chat waiting its turn: how many chats are in front of it, and how many wait in all.
+	QueueAhead int `json:"queue_ahead,omitempty"`
+	QueueSize  int `json:"queue_size,omitempty"`
 	// Messages imported per minute since this import was first seen running, once that is long enough
 	// to mean something.
 	RatePerMinute float64 `json:"rate_per_min,omitempty"`
@@ -126,6 +129,11 @@ func (portal *Portal) computeBackfillStatus(ctx context.Context, source *UserLog
 		status.State = BackfillStateRunning
 		status.Batches = task.BatchCount
 		status.Active = !task.DispatchedAt.IsZero() && time.Since(task.DispatchedAt) < 2*time.Minute
+		if !status.Active {
+			if ahead, total, err := db.BackfillTask.QueuePosition(ctx, task); err == nil {
+				status.QueueAhead, status.QueueSize = ahead, total
+			}
+		}
 	}
 
 	// Pace: measured from when this process first saw the chat importing, and only once that is long
