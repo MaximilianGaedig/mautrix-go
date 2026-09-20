@@ -177,10 +177,14 @@ func (portal *Portal) computeBackfillStatus(ctx context.Context, source *UserLog
 				var previous BackfillStatusContent
 				if err := json.Unmarshal(evt.Content.VeryRaw, &previous); err != nil {
 					zerolog.Ctx(ctx).Debug().Err(err).Msg("Failed to parse the chat's last import status")
-				} else if previous.RemoteTotal != nil {
-					status.RemoteTotal = previous.RemoteTotal
+				} else {
 					portal.backfillStatus.lock.Lock()
-					portal.backfillStatus.remoteTotal = previous.RemoteTotal
+					// What the room already shows, so an identical status isn't written again.
+					portal.backfillStatus.last = &previous
+					if previous.RemoteTotal != nil {
+						portal.backfillStatus.remoteTotal = previous.RemoteTotal
+						status.RemoteTotal = previous.RemoteTotal
+					}
 					portal.backfillStatus.lock.Unlock()
 				}
 			}
@@ -234,11 +238,16 @@ func (portal *Portal) PublishBackfillStatus(ctx context.Context, source *UserLog
 	}
 	state.lock.Lock()
 	defer state.lock.Unlock()
-	if !force && state.last != nil {
+	if state.last != nil {
 		unchanged := state.last.State == status.State && state.last.BridgedMessages == status.BridgedMessages &&
 			state.last.Batches == status.Batches && state.last.Active == status.Active
-		recent := time.Since(state.lastSent) < backfillStatusMinInterval
-		if unchanged || (recent && state.last.State == status.State) {
+		// Nothing to say is nothing to send, even when forced: this state event is rewritten often and
+		// every copy stays in the room's timeline for every client to store. A bridge restart used to
+		// republish an identical status for every chat it has.
+		if unchanged {
+			return
+		}
+		if !force && time.Since(state.lastSent) < backfillStatusMinInterval && state.last.State == status.State {
 			return
 		}
 	}
