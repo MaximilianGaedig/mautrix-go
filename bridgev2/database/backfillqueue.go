@@ -112,6 +112,23 @@ const (
 		SET is_done = false, queue_done = false, next_dispatch_min_ts = $2
 		WHERE bridge_id = $1 AND user_login_id <> ''
 	`
+	// Chats whose room exists but which never got a task (nothing refreshed their info since backfill
+	// was turned on) get one, through the login that has them.
+	createMissingBackfillTasksQuery = `
+		INSERT INTO backfill_task (bridge_id, portal_id, portal_receiver, user_login_id, batch_count, is_done, queue_done, next_dispatch_min_ts)
+		SELECT p.bridge_id, p.id, p.receiver, login.login_id, -1, false, false, $2
+		FROM portal p
+		JOIN LATERAL (
+			SELECT up.login_id FROM user_portal up
+			WHERE up.bridge_id = p.bridge_id AND up.portal_id = p.id AND up.portal_receiver = p.receiver
+			ORDER BY up.preferred DESC LIMIT 1
+		) login ON true
+		WHERE p.bridge_id = $1 AND p.mxid IS NOT NULL AND p.mxid <> ''
+			AND NOT EXISTS (
+				SELECT 1 FROM backfill_task t
+				WHERE t.bridge_id = p.bridge_id AND t.portal_id = p.id AND t.portal_receiver = p.receiver
+			)
+	`
 	deleteBackfillQueueQuery = `
 		DELETE FROM backfill_task
 		WHERE bridge_id = $1 AND portal_id = $2 AND portal_receiver = $3
@@ -158,7 +175,11 @@ func (btq *BackfillTaskQuery) RequestFull(ctx context.Context, portalKey network
 
 // RequestFullAll does the same for every portal's task.
 func (btq *BackfillTaskQuery) RequestFullAll(ctx context.Context) error {
-	return btq.Exec(ctx, requestFullBackfillAllQuery, btq.BridgeID, time.Now().UnixNano())
+	now := time.Now().UnixNano()
+	if err := btq.Exec(ctx, createMissingBackfillTasksQuery, btq.BridgeID, now); err != nil {
+		return err
+	}
+	return btq.Exec(ctx, requestFullBackfillAllQuery, btq.BridgeID, now)
 }
 
 func (btq *BackfillTaskQuery) GetNext(ctx context.Context) (*BackfillTask, error) {
