@@ -8,6 +8,7 @@ package bridgev2
 
 import (
 	"context"
+	"encoding/json"
 	"math"
 	"sync"
 	"time"
@@ -78,6 +79,8 @@ type backfillStatusState struct {
 	last        *BackfillStatusContent
 	lastSent    time.Time
 	remoteTotal *int
+	// Whether the total published earlier has been looked for in the room's state yet (once per run).
+	remoteLoaded bool
 	// When the network was last asked for the total, so a failing count isn't retried on every update.
 	remoteTriedAt time.Time
 	// Where the import's pace is measured from: the first time it was seen running, and its count then.
@@ -160,7 +163,32 @@ func (portal *Portal) computeBackfillStatus(ctx context.Context, source *UserLog
 
 	portal.backfillStatus.lock.Lock()
 	status.RemoteTotal = portal.backfillStatus.remoteTotal
+	loadRemote := status.RemoteTotal == nil && !portal.backfillStatus.remoteLoaded
 	portal.backfillStatus.lock.Unlock()
+	// A total the bridge worked out before outlives this process in the room's own state, so it is read
+	// back once per run. Without this a chat loses its "x of y" on every restart, and for good once the
+	// network can no longer count it - Signal empties the backup archive as it imports it, so a chat that
+	// finished can never be counted again. It also saves asking networks that charge API calls to count.
+	if loadRemote && portal.MXID != "" {
+		if api, ok := portal.Bridge.Matrix.(MatrixConnectorWithArbitraryRoomState); ok {
+			if evt, err := api.GetStateEvent(ctx, portal.MXID, BackfillStatusEventType, ""); err != nil {
+				zerolog.Ctx(ctx).Debug().Err(err).Msg("Failed to read the chat's last import status")
+			} else if evt != nil {
+				var previous BackfillStatusContent
+				if err := json.Unmarshal(evt.Content.VeryRaw, &previous); err != nil {
+					zerolog.Ctx(ctx).Debug().Err(err).Msg("Failed to parse the chat's last import status")
+				} else if previous.RemoteTotal != nil {
+					status.RemoteTotal = previous.RemoteTotal
+					portal.backfillStatus.lock.Lock()
+					portal.backfillStatus.remoteTotal = previous.RemoteTotal
+					portal.backfillStatus.lock.Unlock()
+				}
+			}
+		}
+		portal.backfillStatus.lock.Lock()
+		portal.backfillStatus.remoteLoaded = true
+		portal.backfillStatus.lock.Unlock()
+	}
 	// The total is what makes "x of y" and a time estimate possible, so it is fetched once while the
 	// import runs (and again, if asked, when it ends), not on every update.
 	portal.backfillStatus.lock.Lock()
