@@ -72,6 +72,10 @@ const (
 				completed_at=excluded.completed_at,
 				next_dispatch_min_ts=excluded.next_dispatch_min_ts
 	`
+	rescheduleBackfillQuery = `
+		UPDATE backfill_task SET next_dispatch_min_ts=$4
+		WHERE bridge_id = $1 AND portal_id = $2 AND portal_receiver = $3
+	`
 	markBackfillDispatchedQuery = `
 		UPDATE backfill_task SET dispatched_at=$4, completed_at=NULL, next_dispatch_min_ts=$5
 		WHERE bridge_id = $1 AND portal_id = $2 AND portal_receiver = $3
@@ -169,6 +173,18 @@ func (btq *BackfillTaskQuery) MarkDispatched(ctx context.Context, bq *BackfillTa
 		ctx, markBackfillDispatchedQuery,
 		bq.BridgeID, bq.PortalKey.ID, bq.PortalKey.Receiver,
 		bq.DispatchedAt.UnixNano(), bq.NextDispatchMinTS.UnixNano(),
+	)
+}
+
+// Reschedule brings a task's next attempt forward. Dispatching one pushes its next attempt an hour out so
+// a task still running isn't started twice; a task that failed is not running, and without this it would
+// sit idle for that hour over something as ordinary as one failed request to the network.
+func (btq *BackfillTaskQuery) Reschedule(ctx context.Context, bq *BackfillTask, after time.Duration) error {
+	ensureBridgeIDMatches(&bq.BridgeID, btq.BridgeID)
+	bq.NextDispatchMinTS = time.Now().Add(after)
+	return btq.Exec(
+		ctx, rescheduleBackfillQuery,
+		bq.BridgeID, bq.PortalKey.ID, bq.PortalKey.Receiver, bq.NextDispatchMinTS.UnixNano(),
 	)
 }
 
