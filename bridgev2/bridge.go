@@ -55,6 +55,8 @@ type Bridge struct {
 	Background          bool
 	ExternallyManagedDB bool
 	stopping            atomic.Bool
+	// Set while a final publish of the import totals is already on its way.
+	backfillSummaryPending atomic.Bool
 
 	wakeupBackfillQueue chan struct{}
 	stopBackfillQueue   *exsync.Event

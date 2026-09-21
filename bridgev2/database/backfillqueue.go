@@ -104,6 +104,14 @@ const (
 		WHERE bridge_id = $1 AND next_dispatch_min_ts < $2 AND is_done = false AND queue_done = false AND user_login_id <> '' AND batch_count <> -2
 		ORDER BY next_dispatch_min_ts LIMIT 1
 	`
+	getNextUnfinishedBackfillQuery = `
+		SELECT
+			bridge_id, portal_id, portal_receiver, user_login_id, batch_count, is_done, queue_done,
+			cursor, oldest_message_id, dispatched_at, completed_at, next_dispatch_min_ts
+		FROM backfill_task
+		WHERE bridge_id = $1 AND is_done = false AND queue_done = false AND user_login_id <> '' AND batch_count <> -2
+		LIMIT 1
+	`
 	getNextBackfillQueryForPortal = `
 		SELECT
 			bridge_id, portal_id, portal_receiver, user_login_id, batch_count, is_done, queue_done,
@@ -240,6 +248,13 @@ func (btq *BackfillTaskQuery) QueuePosition(ctx context.Context, task *BackfillT
 
 func (btq *BackfillTaskQuery) GetNext(ctx context.Context) (*BackfillTask, error) {
 	return btq.QueryOne(ctx, getNextBackfillQuery, btq.BridgeID, time.Now().UnixNano())
+}
+
+// GetNextUnfinished answers whether any chat is still waiting, whenever its turn may be - unlike
+// [BackfillTaskQuery.GetNext], which answers what is due now. "Nothing left at all" is what tells the
+// bridge its import is over and the totals are worth writing one last time.
+func (btq *BackfillTaskQuery) GetNextUnfinished(ctx context.Context) (*BackfillTask, error) {
+	return btq.QueryOne(ctx, getNextUnfinishedBackfillQuery, btq.BridgeID)
 }
 
 func (btq *BackfillTaskQuery) GetNextForPortal(ctx context.Context, portalKey networkid.PortalKey, allowCompletedTask bool) (*BackfillTask, error) {

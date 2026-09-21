@@ -26,6 +26,10 @@ const BackfillQueueErrorBackoff = 1 * time.Minute
 const BackfillRetryBackoff = 2 * time.Minute
 const BackfillQueueMaxEmptyBackoff = 10 * time.Minute
 
+// How long an emptied queue is left to settle before the totals are written: chats finish in quick
+// succession at the end of an import, and each of them would otherwise ask for the same full pass.
+const BackfillSummarySettle = 30 * time.Second
+
 func (br *Bridge) WakeupBackfillQueue(manualTask ...*ManualBackfill) {
 	if br.IsStopping() {
 		for _, task := range manualTask {
@@ -265,6 +269,36 @@ func (br *Bridge) publishBackfillStatusForTask(ctx context.Context, task *databa
 	login, _ := br.GetExistingUserLoginByID(ctx, task.UserLoginID)
 	// The network is asked for its total only when the chat is finished: that is when it matters.
 	portal.PublishBackfillStatus(ctx, login, task.IsDone)
+	if task.IsDone {
+		br.publishSummaryIfQueueDrained(ctx)
+	}
+}
+
+// publishSummaryIfQueueDrained rewrites each login's totals once the last chat has finished.
+//
+// Every chat's own status is written as it goes, but the totals a client adds up are published as a
+// whole (BackfillSummaryEventType), and until now only at startup or on command. So the moment the
+// queue emptied, the last summary still said one chat was running - a bridge that had imported
+// everything went on saying it had one left, and nothing ever confirmed that it was done.
+func (br *Bridge) publishSummaryIfQueueDrained(ctx context.Context) {
+	next, err := br.DB.BackfillTask.GetNextUnfinished(ctx)
+	if err != nil || next != nil {
+		return
+	}
+	if !br.backfillSummaryPending.CompareAndSwap(false, true) {
+		return
+	}
+	go func() {
+		defer br.backfillSummaryPending.Store(false)
+		// A moment's grace, so a queue that empties one chat after another publishes once at the end
+		// rather than after each of them.
+		time.Sleep(BackfillSummarySettle)
+		if next, err := br.DB.BackfillTask.GetNextUnfinished(br.BackgroundCtx); err != nil || next != nil {
+			return
+		}
+		br.Log.Info().Msg("Backfill queue is empty; publishing final import totals")
+		br.PublishAllBackfillStatuses(br.BackgroundCtx)
+	}()
 }
 
 func (portal *Portal) deleteBackfillQueueTaskIfRoomDoesNotExist(ctx context.Context) bool {
