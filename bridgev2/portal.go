@@ -2715,8 +2715,12 @@ func (portal *Portal) ensureFunctionalMember(ctx context.Context, ghost *Ghost) 
 		}
 	}
 	// TODO what about non-double-puppeted user ghosts?
-	functionalMembers.Add(portal.Bridge.Bot.GetMXID())
-	if functionalMembers.Add(ghost.Intent.GetMXID()) {
+	// Both results matter: a portal whose state was written before the bridge declared its bot has
+	// the ghost listed and the bot missing, and testing only the ghost meant that room never got the
+	// bot added - so it kept being named after the bridge in every client.
+	botAdded := functionalMembers.Add(portal.Bridge.Bot.GetMXID())
+	ghostAdded := functionalMembers.Add(ghost.Intent.GetMXID())
+	if botAdded || ghostAdded {
 		_, err := portal.Bridge.Bot.SendState(ctx, portal.MXID, event.StateElementFunctionalMembers, "", &event.Content{
 			Parsed: functionalMembers,
 		}, time.Time{})
