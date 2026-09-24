@@ -57,6 +57,10 @@ type userDirectoryResult struct {
 	UserID      id.UserID           `json:"user_id"`
 	DisplayName string              `json:"display_name,omitempty"`
 	AvatarURL   id.ContentURIString `json:"avatar_url,omitempty"`
+	// The line the network uses to tell people with the same name apart: mutual friends, a location,
+	// a username. A ghost's Matrix ID says nothing to the reader, so without this three people called
+	// Max Müller are three identical rows and the reader has to guess.
+	Context string `json:"im.mxg.context,omitempty"`
 }
 
 func (br *Connector) registerUserDirectorySearch() {
@@ -115,6 +119,7 @@ func (br *Connector) PostUserDirectorySearch(w http.ResponseWriter, r *http.Requ
 				UserID:      one.MXID,
 				DisplayName: one.Name,
 				AvatarURL:   one.AvatarURL,
+				Context:     one.Context,
 			})
 			if req.Limit > 0 && len(results) >= req.Limit {
 				exhttp.WriteJSONResponse(w, http.StatusOK, &respUserDirectorySearch{

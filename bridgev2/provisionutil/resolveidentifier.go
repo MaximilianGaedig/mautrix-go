@@ -24,7 +24,9 @@ type RespResolveIdentifier struct {
 	AvatarURL   id.ContentURIString `json:"avatar_url,omitempty"`
 	Identifiers []string            `json:"identifiers,omitempty"`
 	MXID        id.UserID           `json:"mxid,omitempty"`
-	DMRoomID    id.RoomID           `json:"dm_room_mxid,omitempty"`
+	// What the network shows to tell this person apart from others with the same name.
+	Context  string    `json:"context,omitempty"`
+	DMRoomID id.RoomID `json:"dm_room_mxid,omitempty"`
 
 	Portal      *bridgev2.Portal `json:"-"`
 	Ghost       *bridgev2.Ghost  `json:"-"`

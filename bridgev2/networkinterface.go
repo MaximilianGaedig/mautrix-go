@@ -779,6 +779,12 @@ type ResolveIdentifierResponse struct {
 	// This field is required when createChat is true in the ResolveIdentifier call,
 	// and optional otherwise.
 	Chat *CreateChatResponse
+
+	// Context is the one line the network itself shows to tell this person apart from everybody else
+	// with the same name: mutual friends, a location, a username, "you were in a group together".
+	// Optional, and worth setting for search results above all - three people called Max Müller are
+	// indistinguishable by name and avatar, and the Matrix ID of a ghost tells the reader nothing.
+	Context string
 }
 
 var SpecialValueDMRedirectedToBot = networkid.UserID("__fi.mau.bridgev2.dm_redirected_to_bot::" + random.String(10))
