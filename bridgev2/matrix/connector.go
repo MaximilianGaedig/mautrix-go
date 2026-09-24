@@ -174,6 +174,7 @@ func (br *Connector) Init(bridge *bridgev2.Bridge) {
 
 func (br *Connector) Start(ctx context.Context) error {
 	br.Provisioning.Init()
+	br.registerUserDirectorySearch()
 	err := br.initDirectMedia()
 	if err != nil {
 		return err
