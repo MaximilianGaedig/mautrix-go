@@ -34,6 +34,44 @@ type BridgeLoginContent struct {
 	Network       string `json:"network"`
 	CommandPrefix string `json:"command_prefix"`
 	UpdatedTS     int64  `json:"updated_ts"`
+	// Where the bridge's provisioning API is, so a client can ask this bridge things the homeserver cannot
+	// answer - above all "who on this network is called X?", for people who have never been bridged and so
+	// have no ghost in the user directory. Only sent when a client can actually authenticate against it with
+	// its own Matrix access token (provisioning.allow_matrix_auth); the shared secret is never published.
+	ProvisioningURL string `json:"provisioning_url,omitempty"`
+	// What that API can do for this login, so a client asks only for what exists.
+	Can *BridgeLoginCapabilities `json:"can,omitempty"`
+}
+
+// BridgeLoginCapabilities says which optional provisioning endpoints this login's network supports.
+type BridgeLoginCapabilities struct {
+	// The network can be searched for users by name (POST /v3/search_users).
+	SearchUsers bool `json:"search_users,omitempty"`
+	// An identifier can be turned into a chat (POST /v3/create_dm/{identifier}).
+	CreateDM bool `json:"create_dm,omitempty"`
+}
+
+// ProvisioningReachable is implemented by Matrix connectors whose provisioning API a client can reach and
+// authenticate against on its own. Optional: without it, or with an empty URL, nothing is published and a
+// client simply has one fewer thing it can ask the bridge.
+type ProvisioningReachable interface {
+	ProvisioningPublicURL() string
+}
+
+// provisioningReach is where to reach this bridge's provisioning API and what it can do for this login.
+func (br *Bridge) provisioningReach(login *UserLogin) (string, *BridgeLoginCapabilities) {
+	reachable, ok := br.Matrix.(ProvisioningReachable)
+	if !ok {
+		return "", nil
+	}
+	url := reachable.ProvisioningPublicURL()
+	if url == "" {
+		return "", nil
+	}
+	can := &BridgeLoginCapabilities{}
+	_, can.SearchUsers = login.Client.(UserSearchingNetworkAPI)
+	_, can.CreateDM = login.Client.(IdentifierResolvingNetworkAPI)
+	return url, can
 }
 
 // sendFinalLoginState records a login's last state before its queue is torn down. Send() only queues,
@@ -69,6 +107,7 @@ func (bsq *BridgeStateQueue) publishLoginState(ctx context.Context, state status
 	if content.RemoteName == "" {
 		content.RemoteName = login.RemoteName
 	}
+	content.ProvisioningURL, content.Can = bsq.bridge.provisioningReach(login)
 	_, err = bsq.bridge.Bot.SendState(ctx, room, BridgeLoginEventType, string(login.ID), &event.Content{Parsed: content}, time.Time{})
 	if err != nil {
 		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to publish the login's connection state")

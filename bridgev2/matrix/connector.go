@@ -292,6 +292,21 @@ func (br *Connector) GetPublicAddress() string {
 	return strings.TrimRight(br.Config.AppService.PublicAddress, "/")
 }
 
+// ProvisioningPublicURL is the base URL of this bridge's provisioning API, for a client that wants to ask
+// the bridge something the homeserver cannot answer. Empty unless a client can authenticate there with its
+// own Matrix access token: publishing an address a client is not allowed to use is worse than saying nothing,
+// and the shared secret must never leave the bridge.
+func (br *Connector) ProvisioningPublicURL() string {
+	if !br.Config.Provisioning.AllowMatrixAuth || len(br.Config.Provisioning.SharedSecret) < 16 {
+		return ""
+	}
+	address := br.GetPublicAddress()
+	if address == "" {
+		return ""
+	}
+	return address + "/_matrix/provision"
+}
+
 func (br *Connector) GetRouter() *http.ServeMux {
 	if br.GetPublicAddress() != "" {
 		return br.AS.Router
