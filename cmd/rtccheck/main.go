@@ -99,20 +99,70 @@ func main() {
 	}
 	ok("membership round trip", " joined, device RTCCHECK")
 
-	// 4. Actually join the SFU.
-	leg, err := callbridge.JoinRTC(ctx, callbridge.RTCLegConfig{
+	// 4. Actually join the SFU - twice.
+	//
+	// One leg publishes and one subscribes, which is the shape a bridged group call has: a Discord
+	// speaker's leg puts audio in, and the Matrix participants take it out. Connecting alone only
+	// proves the token was accepted; it says nothing about whether media reaches anyone.
+	publisher, err := callbridge.JoinRTC(ctx, callbridge.RTCLegConfig{
 		URL: url, Token: token, Log: zerolog.Nop(),
 	})
 	if err != nil {
-		fail("join livekit", err)
+		fail("join livekit (publisher)", err)
 	}
-	defer leg.Close()
-	ok("join livekit", " connected")
+	defer publisher.Close()
+	ok("join livekit", " publisher connected")
 
-	// 5. Publish audio, the way a Discord speaker's leg would.
-	writer := leg.AudioWriter()
+	// A second identity in the same room, so the SFU has somebody to route to.
+	subURL, subToken, err := callbridge.LiveKitToken(ctx, cli, focus, room.RoomID, "RTCCHECK2")
+	if err != nil {
+		fail("livekit token (subscriber)", err)
+	}
+	subscriber, err := callbridge.JoinRTC(ctx, callbridge.RTCLegConfig{
+		URL: subURL, Token: subToken, Log: zerolog.Nop(),
+	})
+	if err != nil {
+		fail("join livekit (subscriber)", err)
+	}
+	defer subscriber.Close()
+	ok("join livekit", " subscriber connected")
+
+	// 5. Publish audio, the way a Discord speaker's leg would, while the other leg listens.
+	received := make(chan int, 1)
+	go func() {
+		track, trackErr := subscriber.RemoteAudio(ctx)
+		if trackErr != nil {
+			received <- 0
+			return
+		}
+		count := 0
+		for count < 10 {
+			if _, _, readErr := track.ReadRTP(); readErr != nil {
+				break
+			}
+			count++
+		}
+		received <- count
+	}()
+
+	writer := publisher.AudioWriter()
 	sent := 0
-	for i := 0; i < 50; i++ {
+	deadline := time.After(25 * time.Second)
+	ticker := time.NewTicker(20 * time.Millisecond)
+	defer ticker.Stop()
+publish:
+	for i := 0; ; i++ {
+		select {
+		case got := <-received:
+			if got == 0 {
+				fail("audio between participants", fmt.Errorf("the subscriber received nothing after %d sent", sent))
+			}
+			ok("audio between participants", fmt.Sprintf(" %d packets arrived (of %d sent)", got, sent))
+			break publish
+		case <-deadline:
+			fail("audio between participants", fmt.Errorf("nothing arrived within 25s (%d sent)", sent))
+		case <-ticker.C:
+		}
 		err = writer.WriteRTP(&rtp.Packet{
 			Header: rtp.Header{
 				Version: 2, SequenceNumber: uint16(1000 + i), Timestamp: uint32(i) * 960, Marker: i == 0,
@@ -123,9 +173,7 @@ func main() {
 			fail("publish audio", err)
 		}
 		sent++
-		time.Sleep(20 * time.Millisecond)
 	}
-	ok("publish audio", fmt.Sprintf(" %d packets, 1s of RTP", sent))
 
 	// Clear the membership, as a leaving participant does.
 	if _, err = cli.SendStateEvent(ctx, room.RoomID, callbridge.CallMemberEventType, stateKey, map[string]any{}); err != nil {
