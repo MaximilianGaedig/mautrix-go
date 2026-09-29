@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/rs/zerolog"
 	"maunium.net/go/mautrix"
@@ -67,6 +68,11 @@ func main() {
 		os.Exit(1)
 	}
 	fmt.Println("ok    logged in as", resp.UserID)
+
+	if os.Getenv("MODE") == "answer" {
+		answerCall(ctx, cli, roomID, ringFor)
+		return
+	}
 
 	// A real PeerConnection, offering audio like any Matrix client would.
 	leg, err := callbridge.NewLeg(callbridge.LegConfig{Name: "caller", OpusPT: 111, Log: zerolog.Nop()})
@@ -131,6 +137,23 @@ func main() {
 	}
 	fmt.Println("ok    call invite sent, ringing")
 
+	// Send a steady stream once connected, so the far side has something to count.
+	go func() {
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for i := 0; ; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			_ = leg.Local.WriteRTP(&rtp.Packet{
+				Header:  rtp.Header{Version: 2, SequenceNumber: uint16(i), Timestamp: uint32(i) * 960, Marker: i == 0},
+				Payload: make([]byte, 80),
+			})
+		}
+	}()
+
 	connected := make(chan webrtc.PeerConnectionState, 4)
 	leg.OnState(func(s webrtc.PeerConnectionState) {
 		select {
@@ -186,5 +209,102 @@ loop:
 	fmt.Printf("\nRESULT answered=%v connected=%v audio_packets=%d\n", sawAnswer, sawConnected, audioPackets)
 	if !sawAnswer {
 		fmt.Println("(no answer - expected when nobody picks up; the invite still exercised the bridge)")
+	}
+}
+
+
+// answerCall picks up the next call in the room and reports whether audio arrives.
+//
+// This is what makes an end-to-end audio check possible at all: every real callee in this setup
+// declines, so the only way to see media flow through an answered call is to be the callee.
+func answerCall(ctx context.Context, cli *mautrix.Client, roomID id.RoomID, wait time.Duration) {
+	invites := make(chan *event.CallInviteEventContent, 1)
+	syncer := cli.Syncer.(*mautrix.DefaultSyncer)
+	syncer.OnEventType(event.CallInvite, func(ctx context.Context, evt *event.Event) {
+		if evt.RoomID != roomID {
+			return
+		}
+		if inv, ok := evt.Content.Parsed.(*event.CallInviteEventContent); ok {
+			select {
+			case invites <- inv:
+			default:
+			}
+		}
+	})
+	syncCtx, stop := context.WithCancel(ctx)
+	defer stop()
+	go func() { _ = cli.SyncWithContext(syncCtx) }()
+	fmt.Println("ok    waiting for a call")
+
+	var inv *event.CallInviteEventContent
+	select {
+	case inv = <-invites:
+	case <-time.After(wait):
+		fmt.Println("FAIL no call arrived")
+		os.Exit(1)
+	}
+	fmt.Println("ok    call received")
+
+	leg, err := callbridge.NewLeg(callbridge.LegConfig{Name: "callee", OpusPT: 111, Log: zerolog.Nop()})
+	if err != nil {
+		fmt.Println("FAIL create leg:", err)
+		os.Exit(1)
+	}
+	defer leg.Close()
+	if _, err = leg.AnswerOffer(inv.Offer.SDP); err != nil {
+		fmt.Println("FAIL answer offer:", err)
+		os.Exit(1)
+	}
+	answer := leg.WaitGathering(ctx, 8*time.Second)
+	if _, err = cli.SendMessageEvent(ctx, roomID, event.CallAnswer, &event.CallAnswerEventContent{
+		BaseCallEventContent: event.BaseCallEventContent{
+			CallID: inv.CallID, PartyID: "callee-" + uuid.NewString()[:8], Version: event.CallVersion("1"),
+		},
+		Answer: event.CallData{SDP: answer, Type: event.CallDataTypeAnswer},
+	}); err != nil {
+		fmt.Println("FAIL send answer:", err)
+		os.Exit(1)
+	}
+	fmt.Println("ok    answered")
+
+	go func() {
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for i := 0; ; i++ {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+			}
+			_ = leg.Local.WriteRTP(&rtp.Packet{
+				Header:  rtp.Header{Version: 2, SequenceNumber: uint16(i), Timestamp: uint32(i) * 960, Marker: i == 0},
+				Payload: make([]byte, 80),
+			})
+		}
+	}()
+
+	count := 0
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		track, terr := leg.RemoteTrack(ctx)
+		if terr != nil {
+			return
+		}
+		for count < 50 {
+			if _, _, rerr := track.ReadRTP(); rerr != nil {
+				return
+			}
+			count++
+		}
+	}()
+	select {
+	case <-done:
+	case <-time.After(wait):
+	}
+	fmt.Printf("\nRESULT answered=true audio_packets=%d\n", count)
+	if count == 0 {
+		fmt.Println("FAIL no audio arrived on an answered call")
+		os.Exit(1)
 	}
 }
