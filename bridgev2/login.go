@@ -56,9 +56,14 @@ type LoginProcessWithOverride interface {
 	StartWithOverride(ctx context.Context, override *UserLogin) (*LoginStep, error)
 }
 
+type FingerprintingRoundTripper interface {
+	http.RoundTripper
+	SetFingerprint(fingerprint string)
+}
+
 type LoginStartParams struct {
 	Override *UserLogin
-	HTTP     http.RoundTripper
+	HTTP     FingerprintingRoundTripper
 }
 
 type LoginProcessWithParams interface {
@@ -159,7 +164,7 @@ func (ls *LoginStep) MarshalZerologObject(e *zerolog.Event) {
 		e.Any("display_and_wait", ls.DisplayAndWaitParams)
 	}
 	if ls.CookiesParams != nil {
-		e.Any("cookies", ls.CookiesParams)
+		e.Object("cookies", ls.CookiesParams)
 	}
 	if ls.ClientHTTPParams != nil {
 		e.Object("client_http", ls.ClientHTTPParams)
@@ -181,6 +186,8 @@ type LoginClientHTTPParams struct {
 	URL       string      `json:"url"`
 	Headers   http.Header `json:"headers,omitempty"`
 	Body      []byte      `json:"body,omitempty"`
+
+	Fingerprint string `json:"fingerprint,omitempty"`
 }
 
 func (lchp *LoginClientHTTPParams) MarshalZerologObject(e *zerolog.Event) {
@@ -188,15 +195,17 @@ func (lchp *LoginClientHTTPParams) MarshalZerologObject(e *zerolog.Event) {
 		Str("method", lchp.Method).
 		Str("url", lchp.URL).
 		Int("header_count", len(lchp.Headers)).
-		Int("body_length", len(lchp.Body))
+		Int("body_length", len(lchp.Body)).
+		Str("fingerprint", lchp.Fingerprint)
 }
 
 type LoginClientHTTPResponse struct {
-	StatusCode int         `json:"status_code,omitzero"`
-	FinalURL   string      `json:"final_url,omitempty"`
-	Headers    http.Header `json:"headers,omitempty"`
-	Body       []byte      `json:"body,omitempty"`
-	Error      string      `json:"error,omitempty"`
+	StatusCode  int         `json:"status_code,omitzero"`
+	FinalURL    string      `json:"final_url,omitempty"`
+	Headers     http.Header `json:"headers,omitempty"`
+	Body        []byte      `json:"body,omitempty"`
+	Error       string      `json:"error,omitempty"`
+	Fingerprint string      `json:"fingerprint,omitempty"`
 }
 
 func (lchr *LoginClientHTTPResponse) IsValid() bool {
@@ -265,10 +274,23 @@ type LoginCookieField struct {
 	Pattern string `json:"pattern,omitempty"`
 }
 
+type LoginCookie struct {
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Domain string `json:"domain"`
+	// Path defaults to / if empty.
+	Path     string `json:"path,omitempty"`
+	Secure   bool   `json:"secure,omitzero"`
+	HTTPOnly bool   `json:"http_only,omitzero"`
+}
+
 type LoginCookiesParams struct {
 	URL       string `json:"url"`
 	UserAgent string `json:"user_agent,omitempty"`
 
+	// Cookies the client should set in the webview before loading the URL, used to continue a login
+	// session that was partially completed elsewhere (e.g. a captcha or checkpoint challenge).
+	InitialCookies []LoginCookie `json:"initial_cookies,omitempty"`
 	// The fields that are needed for this cookie login.
 	Fields []LoginCookieField `json:"fields"`
 	// A JavaScript snippet that can extract some or all of the fields.
@@ -284,6 +306,16 @@ type LoginCookiesParams struct {
 	// If set, the client should load the URL and run ExtractJS in a webview that is not shown to the
 	// user.
 	Hidden bool `json:"hidden,omitzero"`
+}
+
+func (lcp *LoginCookiesParams) MarshalZerologObject(e *zerolog.Event) {
+	e.Str("url", lcp.URL).
+		Str("user_agent", lcp.UserAgent).
+		Int("initial_cookie_count", len(lcp.InitialCookies)).
+		Any("fields", lcp.Fields).
+		Str("extract_js", lcp.ExtractJS).
+		Str("wait_for_url_pattern", lcp.WaitForURLPattern).
+		Bool("hidden", lcp.Hidden)
 }
 
 type LoginInputFieldType string
@@ -407,7 +439,7 @@ type LoginUserInputAttachment struct {
 	Type     event.MessageType            `json:"type,omitempty"`
 	FileName string                       `json:"filename,omitempty"`
 	Content  []byte                       `json:"content,omitempty"`
-	Info     LoginUserInputAttachmentInfo `json:"info,omitempty"`
+	Info     LoginUserInputAttachmentInfo `json:"info,omitzero"`
 }
 
 type LoginUserInputAttachmentInfo struct {

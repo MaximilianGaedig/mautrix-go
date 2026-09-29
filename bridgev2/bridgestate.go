@@ -11,10 +11,12 @@ import (
 	"fmt"
 	"math/rand/v2"
 	"runtime/debug"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/exerrors"
 	"go.mau.fi/util/exfmt"
 
 	"maunium.net/go/mautrix/bridgev2/status"
@@ -31,12 +33,14 @@ type BridgeStateQueue struct {
 	ch         chan status.BridgeState
 	bridge     *Bridge
 	login      *UserLogin
+	writeLock  sync.Mutex
 
 	firstTransientDisconnect time.Time
 	cancelScheduledNotice    atomic.Pointer[context.CancelFunc]
 
 	stopChan      chan struct{}
 	stopReconnect atomic.Pointer[context.CancelFunc]
+	destroyed     bool
 
 	unknownErrorReconnects int
 }
@@ -44,12 +48,16 @@ type BridgeStateQueue struct {
 func (br *Bridge) SendGlobalBridgeState(state status.BridgeState) {
 	state = state.Fill(nil)
 	for {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(br.BackgroundCtx, 30*time.Second)
 		if err := br.Matrix.SendBridgeStatus(ctx, &state); err != nil {
 			br.Log.Warn().Err(err).Msg("Failed to update global bridge state")
 			cancel()
-			time.Sleep(5 * time.Second)
-			continue
+			select {
+			case <-br.BackgroundCtx.Done():
+				return
+			case <-time.After(5 * time.Second):
+				continue
+			}
 		} else {
 			br.Log.Debug().Any("bridge_state", state).Msg("Sent new global bridge state")
 			cancel()
@@ -70,6 +78,15 @@ func (br *Bridge) NewBridgeStateQueue(login *UserLogin) *BridgeStateQueue {
 }
 
 func (bsq *BridgeStateQueue) Destroy() {
+	if bsq == nil {
+		return
+	}
+	bsq.writeLock.Lock()
+	defer bsq.writeLock.Unlock()
+	if bsq.destroyed {
+		return
+	}
+	bsq.destroyed = true
 	close(bsq.stopChan)
 	close(bsq.ch)
 	bsq.StopUnknownErrorReconnect()
@@ -92,9 +109,8 @@ func (bsq *BridgeStateQueue) loop() {
 		defer func() {
 			err := recover()
 			if err != nil {
-				bsq.login.Log.Error().
+				bsq.login.Log.Err(exerrors.RecoverToError(err)).
 					Bytes(zerolog.ErrorStackFieldName, debug.Stack()).
-					Any(zerolog.ErrorFieldName, err).
 					Msg("Panic in bridge state loop")
 			}
 		}()
@@ -297,20 +313,24 @@ func (bsq *BridgeStateQueue) immediateSendBridgeState(state status.BridgeState) 
 		go bsq.unknownErrorReconnect(state)
 	}
 
-	ctx := bsq.login.Log.WithContext(context.Background())
-	bsq.sendNotice(ctx, state, false)
-	bsq.publishLoginState(ctx, state)
+	bgCtx := bsq.login.Log.WithContext(bsq.bridge.BackgroundCtx)
+	bsq.sendNotice(bgCtx, state, false)
+	bsq.publishLoginState(bgCtx, state)
 
 	retryIn := 2
 	for {
-		ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		ctx, cancel := context.WithTimeout(bgCtx, 30*time.Second)
 		err := bsq.bridge.Matrix.SendBridgeStatus(ctx, &state)
 		cancel()
 
 		if err != nil {
 			bsq.login.Log.Warn().Err(err).
+				Str("state_event", string(state.StateEvent)).
 				Int("retry_in_seconds", retryIn).
 				Msg("Failed to update bridge state")
+			if bgCtx.Err() != nil {
+				return
+			}
 			time.Sleep(time.Duration(retryIn) * time.Second)
 			retryIn *= 2
 			if retryIn > 64 {
@@ -332,6 +352,15 @@ func (bsq *BridgeStateQueue) Send(state status.BridgeState) {
 	}
 
 	state = state.Fill(bsq.login)
+	bsq.writeLock.Lock()
+	defer bsq.writeLock.Unlock()
+	if bsq.destroyed {
+		bsq.login.Log.Warn().
+			Any("bridge_state", state).
+			Msg("Tried to send bridge state on destroyed queue")
+		return
+	}
+
 	bsq.prevUnsent = &state
 
 	if len(bsq.ch) >= 8 {
@@ -344,7 +373,9 @@ func (bsq *BridgeStateQueue) Send(state status.BridgeState) {
 	select {
 	case bsq.ch <- state:
 	default:
-		bsq.login.Log.Error().Msg("Bridge state queue is full, dropped new state")
+		bsq.login.Log.Error().
+			Any("bridge_state", state).
+			Msg("Bridge state queue is full, dropped new state")
 	}
 }
 
@@ -356,7 +387,7 @@ func (bsq *BridgeStateQueue) GetPrev() status.BridgeState {
 }
 
 func (bsq *BridgeStateQueue) GetPrevUnsent() status.BridgeState {
-	if bsq != nil && bsq.prevSent != nil {
+	if bsq != nil && bsq.prevUnsent != nil {
 		return *bsq.prevUnsent
 	}
 	return status.BridgeState{}

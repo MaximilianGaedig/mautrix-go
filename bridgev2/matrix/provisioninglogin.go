@@ -19,6 +19,7 @@ import (
 
 	"github.com/rs/xid"
 	"github.com/rs/zerolog"
+	"go.mau.fi/util/exerrors"
 	"go.mau.fi/util/exhttp"
 
 	"maunium.net/go/mautrix"
@@ -70,7 +71,8 @@ type ProvLogin struct {
 	step     *stepManager
 	Override *bridgev2.UserLogin
 
-	HTTPLock sync.Mutex
+	HTTPLock    sync.Mutex
+	fingerprint string
 
 	Ctx       context.Context
 	CancelCtx context.CancelFunc
@@ -123,7 +125,7 @@ func (prov *ProvisioningAPI) PostLoginStart(w http.ResponseWriter, r *http.Reque
 		Str("login_id", loginID).
 		Msg("Created login process, now starting")
 
-	var rt http.RoundTripper
+	var rt bridgev2.FingerprintingRoundTripper
 	if r.URL.Query().Get("client_http") == "1" {
 		rt = provLogin
 	}
@@ -441,17 +443,18 @@ func (prov *ProvisioningAPI) executeStep(
 	defer func() {
 		v := recover()
 		if v != nil {
-			var err error
-			var ok bool
-			if err, ok = v.(error); !ok {
-				err = fmt.Errorf("%v", err)
-			}
+			err := exerrors.RecoverToError(v)
 			zerolog.Ctx(ctx).
 				Err(err).
 				Bytes(zerolog.ErrorStackFieldName, debug.Stack()).
 				Msg("Panic in login step execution")
 			login.step.WithNonErroringLock(func(sm *stepManager) {
-				stepResult.err = err
+				if sm.err == nil {
+					sm.err = err
+				}
+				if stepResult != nil {
+					stepResult.err = err
+				}
 				sm.started = false
 				sm.stepCancel = nil
 				if sm.wait != nil {

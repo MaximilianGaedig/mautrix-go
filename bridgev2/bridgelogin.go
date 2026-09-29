@@ -49,6 +49,10 @@ type BridgeLoginCapabilities struct {
 	SearchUsers bool `json:"search_users,omitempty"`
 	// An identifier can be turned into a chat (POST /v3/create_dm/{identifier}).
 	CreateDM bool `json:"create_dm,omitempty"`
+	// The network can say who is in the user's contacts (GET /v3/contacts), which is where phone
+	// numbers and other identifiers come from - and so where one person's accounts on different
+	// networks can be recognised as one person.
+	ListContacts bool `json:"list_contacts,omitempty"`
 }
 
 // ProvisioningReachable is implemented by Matrix connectors whose provisioning API a client can reach and
@@ -71,6 +75,7 @@ func (br *Bridge) provisioningReach(login *UserLogin) (string, *BridgeLoginCapab
 	can := &BridgeLoginCapabilities{}
 	_, can.SearchUsers = login.Client.(UserSearchingNetworkAPI)
 	_, can.CreateDM = login.Client.(IdentifierResolvingNetworkAPI)
+	_, can.ListContacts = login.Client.(ContactListingNetworkAPI)
 	return url, can
 }
 

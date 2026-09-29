@@ -336,6 +336,7 @@ type RemoteEchoHandler func(RemoteMessage, *database.Message) (bool, error)
 type MatrixMessageResponse struct {
 	DB          *database.Message
 	StreamOrder int64
+	Disappear   *database.DisappearingSetting
 	// If Pending is set, the bridge will not save the provided message to the database.
 	// This should only be used if AddPendingToSave has been called.
 	Pending bool
@@ -1055,7 +1056,8 @@ type WebPushConfig struct {
 }
 
 type FCMPushConfig struct {
-	SenderID string `json:"sender_id"`
+	SenderID  string          `json:"sender_id"`
+	LegacyIID json.RawMessage `json:"legacy_iid,omitempty"`
 }
 
 type APNsPushConfig struct {

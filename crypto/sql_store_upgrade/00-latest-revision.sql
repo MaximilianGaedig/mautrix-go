@@ -1,4 +1,4 @@
--- v0 -> v21 (compatible with v20+): Latest revision
+-- v0 -> v22 (compatible with v20+): Latest revision
 CREATE TABLE crypto_account (
 	account_id         TEXT    PRIMARY KEY,
 	device_id          TEXT    NOT NULL,
@@ -18,7 +18,9 @@ CREATE TABLE crypto_message_index (
 
 CREATE TABLE crypto_tracked_user (
 	user_id          TEXT PRIMARY KEY,
-	devices_outdated BOOLEAN NOT NULL DEFAULT FALSE
+	devices_outdated BOOLEAN NOT NULL DEFAULT FALSE,
+	last_attempt     BIGINT,
+	error_count      INTEGER
 );
 
 CREATE TABLE crypto_device (

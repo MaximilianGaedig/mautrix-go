@@ -25,7 +25,6 @@ import (
 	_ "go.mau.fi/util/dbutil/litestream"
 	"go.mau.fi/util/exbytes"
 	"go.mau.fi/util/exsync"
-	"go.mau.fi/util/ptr"
 	"go.mau.fi/util/random"
 	"golang.org/x/sync/semaphore"
 
@@ -677,7 +676,7 @@ func (br *Connector) GetStateEvent(ctx context.Context, roomID id.RoomID, eventT
 				return &event.Event{
 					Type:     event.StateJoinRules,
 					RoomID:   roomID,
-					StateKey: ptr.Ptr(""),
+					StateKey: new(""),
 					Content:  event.Content{Parsed: joinRulesContent},
 				}, nil
 			}

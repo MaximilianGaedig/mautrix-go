@@ -473,6 +473,7 @@ func (br *Bridge) stop(isRunOnce bool, timeout time.Duration) {
 		for _, login := range br.userLoginsByID {
 			go func() {
 				login.DisconnectWithTimeout(timeout)
+				login.BridgeState.Destroy()
 				wg.Done()
 			}()
 		}

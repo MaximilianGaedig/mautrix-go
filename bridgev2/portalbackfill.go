@@ -156,10 +156,8 @@ func (portal *Portal) doBackwardsBackfill(ctx context.Context, source *UserLogin
 		Int("message_count", len(resp.Messages)).
 		Msg("Fetched messages for backward backfill")
 	task.Cursor = resp.Cursor
-	if !resp.HasMore {
-		task.IsDone = true
-		task.QueueDone = true
-	}
+	task.IsDone = !resp.HasMore
+	task.QueueDone = task.IsDone
 	if len(resp.Messages) == 0 {
 		if !resp.HasMore {
 			log.Debug().Msg("No messages to backfill, marking backfill task as done")
@@ -281,10 +279,10 @@ func (portal *Portal) cutoffMessages(ctx context.Context, messages []*BackfillMe
 	} else {
 		cutoff := -1
 		var cutoffIDs []networkid.MessageID
-		for i := len(messages) - 1; i >= 0; i-- {
-			if messages[i].ID == lastMessage.ID || !messages[i].Timestamp.Before(lastMessage.Timestamp) {
+		for i, message := range slices.Backward(messages) {
+			if message.ID == lastMessage.ID || !message.Timestamp.Before(lastMessage.Timestamp) {
 				cutoff = i
-				cutoffIDs = append(cutoffIDs, messages[i].ID)
+				cutoffIDs = append(cutoffIDs, message.ID)
 			} else {
 				break
 			}
