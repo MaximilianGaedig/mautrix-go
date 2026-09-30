@@ -142,6 +142,7 @@ func (br *Connector) Init(bridge *bridgev2.Bridge) {
 		event.EventSticker,
 		event.EventUnstablePollStart,
 		event.EventUnstablePollResponse,
+		event.EventUnstablePollEnd,
 		event.EventReaction,
 		event.EventRedaction,
 		event.StateMember,

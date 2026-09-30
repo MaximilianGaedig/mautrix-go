@@ -906,6 +906,8 @@ func (portal *Portal) handleMatrixEvent(ctx context.Context, sender *User, evt *
 	switch evt.Type {
 	case event.EventMessage, event.EventSticker, event.EventUnstablePollStart, event.EventUnstablePollResponse:
 		return portal.handleMatrixMessage(ctx, login, origSender, evt)
+	case event.EventUnstablePollEnd:
+		return portal.handleMatrixPollEnd(ctx, login, origSender, evt)
 	case event.EventReaction:
 		if origSender != nil {
 			log.Debug().Msg("Ignoring reaction event from relayed user")
@@ -4564,6 +4566,39 @@ func pinChanges(previous, current []id.EventID) []pinChange {
 }
 
 // handleMatrixPins bridges a change to the room's pinned events, one message at a time.
+func (portal *Portal) handleMatrixPollEnd(
+	ctx context.Context, sender *UserLogin, origSender *OrigSender, evt *event.Event,
+) EventHandlingResult {
+	api, ok := sender.Client.(PollEndHandlingNetworkAPI)
+	if !ok {
+		return EventHandlingResultIgnored.WithMSSError(ErrPollsNotSupported)
+	}
+	content, ok := evt.Content.Parsed.(*event.PollEndEventContent)
+	if !ok {
+		return EventHandlingResultFailed.WithMSSError(fmt.Errorf("%w: %T", ErrUnexpectedParsedContentType, evt.Content.Parsed))
+	}
+	poll, err := portal.Bridge.DB.Message.GetPartByMXID(ctx, content.RelatesTo.GetReferenceID())
+	if err != nil {
+		return EventHandlingResultFailed.WithMSSError(fmt.Errorf("%w: failed to get poll message: %w", ErrDatabaseError, err))
+	} else if poll == nil {
+		return EventHandlingResultFailed.WithMSSError(ErrUnknownPoll)
+	}
+	err = api.HandleMatrixPollEnd(ctx, &MatrixPollEnd{
+		MatrixEventBase: MatrixEventBase[*event.PollEndEventContent]{
+			Event:      evt,
+			Content:    content,
+			Portal:     portal,
+			OrigSender: origSender,
+		},
+		Poll: poll,
+	})
+	if err != nil {
+		return EventHandlingResultFailed.WithMSSError(err)
+	}
+	portal.sendSuccessStatus(ctx, evt, 0, "", nil)
+	return EventHandlingResultSuccess
+}
+
 func (portal *Portal) handleMatrixPins(
 	ctx context.Context, sender *UserLogin, origSender *OrigSender, evt *event.Event,
 ) EventHandlingResult {

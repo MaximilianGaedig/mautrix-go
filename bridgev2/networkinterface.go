@@ -668,6 +668,13 @@ type PollHandlingNetworkAPI interface {
 	HandleMatrixPollVote(ctx context.Context, msg *MatrixPollVote) (*MatrixMessageResponse, error)
 }
 
+// PollEndHandlingNetworkAPI is an optional interface that network connectors can implement to close a poll
+// on the network when it is ended in Matrix.
+type PollEndHandlingNetworkAPI interface {
+	NetworkAPI
+	HandleMatrixPollEnd(ctx context.Context, msg *MatrixPollEnd) error
+}
+
 // ReactionHandlingNetworkAPI is an optional interface that network connectors can implement to handle message reactions.
 type ReactionHandlingNetworkAPI interface {
 	NetworkAPI
@@ -1495,6 +1502,13 @@ type MatrixPollVote struct {
 	MatrixMessage
 	VoteTo  *database.Message
 	Content *event.PollResponseEventContent
+}
+
+// MatrixPollEnd is a poll being ended (closed to further votes) in a portal room.
+type MatrixPollEnd struct {
+	MatrixEventBase[*event.PollEndEventContent]
+	// The bridged poll that was ended.
+	Poll *database.Message
 }
 
 type MatrixReaction struct {

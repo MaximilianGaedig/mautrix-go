@@ -30,6 +30,28 @@ func (content *PollResponseEventContent) SetRelatesTo(rel *RelatesTo) {
 	content.RelatesTo = *rel
 }
 
+// PollEndEventContent ends a poll (MSC3381). Only the end sent by the poll's creator counts.
+type PollEndEventContent struct {
+	RelatesTo RelatesTo `json:"m.relates_to"`
+	End       struct{}  `json:"org.matrix.msc3381.poll.end"`
+	MSC1767Message
+}
+
+func (content *PollEndEventContent) GetRelatesTo() *RelatesTo {
+	return &content.RelatesTo
+}
+
+func (content *PollEndEventContent) OptionalGetRelatesTo() *RelatesTo {
+	if content.RelatesTo.Type == "" {
+		return nil
+	}
+	return &content.RelatesTo
+}
+
+func (content *PollEndEventContent) SetRelatesTo(rel *RelatesTo) {
+	content.RelatesTo = *rel
+}
+
 type MSC1767Message struct {
 	Text    string           `json:"org.matrix.msc1767.text,omitempty"`
 	HTML    string           `json:"org.matrix.msc1767.html,omitempty"`

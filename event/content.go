@@ -66,6 +66,7 @@ var TypeMap = map[Type]reflect.Type{
 
 	EventUnstablePollStart:    reflect.TypeFor[PollStartEventContent](),
 	EventUnstablePollResponse: reflect.TypeFor[PollResponseEventContent](),
+	EventUnstablePollEnd:      reflect.TypeFor[PollEndEventContent](),
 
 	BeeperMessageStatus:        reflect.TypeFor[BeeperMessageStatusEventContent](),
 	BeeperTranscription:        reflect.TypeFor[BeeperTranscriptionEventContent](),
