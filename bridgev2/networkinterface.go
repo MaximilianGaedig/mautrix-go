@@ -455,6 +455,17 @@ type BackgroundSyncingNetworkAPI interface {
 	ConnectBackground(ctx context.Context, params *ConnectBackgroundParams) error
 }
 
+// ChatListSyncingNetworkAPI is an optional interface that network connectors can implement to go over
+// the login's whole chat list again on request, creating portals for chats that do not have one (for
+// example after a portal was deleted) and resyncing the ones that do. Connectors usually do this once,
+// after login; this lets a user ask for it again.
+type ChatListSyncingNetworkAPI interface {
+	NetworkAPI
+	// SyncChatList walks the chat list and queues a resync for every chat in it. It may block until the
+	// walk is done.
+	SyncChatList(ctx context.Context) error
+}
+
 // CredentialExportingNetworkAPI is an optional interface that networks connectors can implement to support export of
 // the credentials associated with that login. Credential type is bridge specific.
 type CredentialExportingNetworkAPI interface {

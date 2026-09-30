@@ -5647,6 +5647,46 @@ func (portal *Portal) safeDBDelete(ctx context.Context) error {
 	return portal.Bridge.DB.Portal.Delete(ctx, portal.PortalKey)
 }
 
+// Recreate replaces the portal's Matrix room with a new one for the same chat.
+//
+// The new room is created from the chat's current info and backfilled again, with the room settings the
+// bridge uses now (for example, without encryption if new rooms are no longer encrypted). The old room is
+// tombstoned with the new one as its replacement, so clients point readers to it and hide the old one, and
+// the bridge's ghosts leave it. Real users stay in the old room and can still read its history.
+func (portal *Portal) Recreate(ctx context.Context, source *UserLogin) (id.RoomID, error) {
+	info, err := source.Client.GetChatInfo(ctx, portal)
+	if err != nil {
+		return "", fmt.Errorf("failed to get chat info: %w", err)
+	}
+	oldMXID := portal.MXID
+	// The bridged messages point at events in the old room; the new room gets its own from the backfill.
+	if err = portal.Bridge.DB.Message.DeleteInChunks(ctx, portal.PortalKey); err != nil {
+		return "", fmt.Errorf("failed to delete old message mapping: %w", err)
+	}
+	if err = portal.RemoveMXID(ctx); err != nil {
+		return "", fmt.Errorf("failed to unlink old room: %w", err)
+	}
+	if err = portal.CreateMatrixRoom(ctx, source, info); err != nil {
+		return "", fmt.Errorf("failed to create new room: %w", err)
+	}
+	if oldMXID == "" {
+		return portal.MXID, nil
+	}
+	_, err = portal.Bridge.Bot.SendState(ctx, oldMXID, event.StateTombstone, "", &event.Content{
+		Parsed: &event.TombstoneEventContent{
+			Body:            "This chat has moved to a new room",
+			ReplacementRoom: portal.MXID,
+		},
+	}, time.Now())
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Stringer("old_room_id", oldMXID).Msg("Failed to tombstone old room")
+	}
+	if err = portal.Bridge.Bot.DeleteRoom(ctx, oldMXID, true); err != nil {
+		zerolog.Ctx(ctx).Err(err).Stringer("old_room_id", oldMXID).Msg("Failed to remove ghosts from old room")
+	}
+	return portal.MXID, nil
+}
+
 func (portal *Portal) RemoveMXID(ctx context.Context) error {
 	return portal.removeMXID(ctx, false)
 }
