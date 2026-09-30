@@ -1214,6 +1214,9 @@ func (portal *Portal) checkMessageContentCaps(caps *event.RoomFeatures, content 
 				return fmt.Errorf("%w (%s in %s)", ErrUnsupportedMediaType, content.Info.MimeType, capMsgType)
 			}
 		}
+		if !feat.SupportsViewLimitedType(content.BeeperViewLimited) {
+			return ErrUnsupportedViewLimitedType
+		}
 		fallthrough
 	default:
 	}

@@ -11,6 +11,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/pprof"
 	"strings"
@@ -32,6 +33,7 @@ import (
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/bridgev2/provisionutil"
 	"maunium.net/go/mautrix/bridgev2/status"
+	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/federation"
 	"maunium.net/go/mautrix/id"
 )
@@ -140,6 +142,7 @@ func (prov *ProvisioningAPI) Init() {
 	prov.Router.HandleFunc("POST /v3/create_dm/{identifier}", prov.PostCreateDM)
 	prov.Router.HandleFunc("POST /v3/create_group/{type}", prov.PostCreateGroup)
 	prov.Router.HandleFunc("POST /v3/backfill/{roomID}", prov.PostPaginate)
+	prov.Router.HandleFunc("POST /v3/view_limited_media/{eventID}", prov.PostViewLimitedMedia)
 	prov.Router.HandleFunc("GET /v3/image_pack/import", prov.ImportImagePack)
 	prov.Router.HandleFunc("POST /v3/image_pack/import", prov.ImportImagePack)
 	prov.Router.HandleFunc("GET /v3/image_pack/list", prov.ListImagePacks)
@@ -304,7 +307,11 @@ func (prov *ProvisioningAPI) AuthMiddleware(h http.Handler) http.Handler {
 			mautrix.MForbidden.WithMessage("User does not have login permissions").Write(w)
 			return
 		}
-		r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+		origBody := r.Body
+		r.GetBody = func() (io.ReadCloser, error) {
+			return origBody, nil
+		}
+		r.Body = http.MaxBytesReader(w, origBody, 64*1024)
 
 		ctx := context.WithValue(r.Context(), ProvisioningKeyRequest, r)
 		ctx = context.WithValue(ctx, provisioningUserKey, user)
@@ -471,6 +478,27 @@ func RespondWithError(w http.ResponseWriter, err error, message string) {
 	} else {
 		mautrix.MUnknown.WithMessage(message).WithInternalError(err).Write(w)
 	}
+}
+
+func (prov *ProvisioningAPI) PostViewLimitedMedia(w http.ResponseWriter, r *http.Request) {
+	login := prov.GetLoginForRequest(w, r)
+	if login == nil {
+		return
+	}
+	var request struct {
+		Limit *event.BeeperViewLimitedMedia `json:"com.beeper.view_limited"`
+	}
+	err := json.NewDecoder(r.Body).Decode(&request)
+	if err != nil {
+		zerolog.Ctx(r.Context()).Err(err).Msg("Failed to decode request body")
+		mautrix.MNotJSON.WithMessage("Failed to decode request body").Write(w)
+		return
+	}
+	if err := prov.br.Bridge.ViewLimitedMedia(r.Context(), login, id.EventID(r.PathValue("eventID")), request.Limit); err != nil {
+		RespondWithError(w, err, "Failed to open media")
+		return
+	}
+	exhttp.WriteEmptyJSONResponse(w, http.StatusOK)
 }
 
 func (prov *ProvisioningAPI) doResolveIdentifier(w http.ResponseWriter, r *http.Request, createChat bool) {
