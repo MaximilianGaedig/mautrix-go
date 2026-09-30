@@ -57,12 +57,14 @@ type RTCLeg struct {
 
 	mu          sync.Mutex
 	video       *lksdk.LocalTrack
+	screen      *lksdk.LocalTrack
 	remoteAudio chan *webrtc.TrackRemote
 	remoteVideo chan *webrtc.TrackRemote
 	owners      map[*webrtc.TrackRemote]*lksdk.RemoteParticipant
 	receivers   map[*webrtc.TrackRemote]*webrtc.RTPReceiver
 	onPeers     func(identities []string)
 	onKeyframe  func()
+	onScreenKey func()
 	onMedia     func(audioOn, videoOn bool)
 	closed      bool
 }
@@ -149,30 +151,40 @@ func (l *RTCLeg) AudioWriter() RTPWriter { return l.audio }
 
 // AddVideoTrack publishes a camera track (once) and returns where the other network's video goes.
 func (l *RTCLeg) AddVideoTrack(mime string) (RTPWriter, error) {
+	return l.addVideo(mime, &l.video, livekit.TrackSource_CAMERA, "camera", l.requestKeyframe)
+}
+
+// AddScreenTrack publishes a screen share track (once) and returns where the other network's shared
+// screen goes: a source of its own, so Element Call shows it as a screen share beside the camera.
+func (l *RTCLeg) AddScreenTrack(mime string) (RTPWriter, error) {
+	return l.addVideo(mime, &l.screen, livekit.TrackSource_SCREEN_SHARE, "screen", l.requestScreenKeyframe)
+}
+
+func (l *RTCLeg) addVideo(mime string, slot **lksdk.LocalTrack, source livekit.TrackSource, name string, onKeyframe func()) (RTPWriter, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
-	if l.video != nil {
-		return localTrackWriter{l.video}, nil
+	if *slot != nil {
+		return localTrackWriter{*slot}, nil
 	}
 	// A LiveKit LocalTrack rather than a static one: it hands us the subscribers' keyframe requests
 	// (PLI/FIR), which the SDK otherwise swallows.
-	video, err := lksdk.NewLocalTrack(videoCapability(mime), lksdk.WithRTCPHandler(func(p rtcp.Packet) {
+	track, err := lksdk.NewLocalTrack(videoCapability(mime), lksdk.WithRTCPHandler(func(p rtcp.Packet) {
 		switch p.(type) {
 		case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
-			l.requestKeyframe()
+			onKeyframe()
 		}
 	}))
 	if err != nil {
 		return nil, err
 	}
-	if _, err = l.room.LocalParticipant.PublishTrack(video, &lksdk.TrackPublicationOptions{
-		Name:   "camera",
-		Source: livekit.TrackSource_CAMERA,
+	if _, err = l.room.LocalParticipant.PublishTrack(track, &lksdk.TrackPublicationOptions{
+		Name:   name,
+		Source: source,
 	}); err != nil {
-		return nil, fmt.Errorf("publish video: %w", err)
+		return nil, fmt.Errorf("publish %s: %w", name, err)
 	}
-	l.video = video
-	return localTrackWriter{video}, nil
+	*slot = track
+	return localTrackWriter{track}, nil
 }
 
 // localTrackWriter adapts a LiveKit LocalTrack to RTPWriter.
@@ -215,6 +227,22 @@ func (l *RTCLeg) OnKeyframeRequest(fn func()) {
 	l.mu.Lock()
 	l.onKeyframe = fn
 	l.mu.Unlock()
+}
+
+// OnScreenKeyframeRequest is called when a Matrix participant needs a keyframe of our screen share.
+func (l *RTCLeg) OnScreenKeyframeRequest(fn func()) {
+	l.mu.Lock()
+	l.onScreenKey = fn
+	l.mu.Unlock()
+}
+
+func (l *RTCLeg) requestScreenKeyframe() {
+	l.mu.Lock()
+	fn := l.onScreenKey
+	l.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // OnMediaState is called with whether the other participants' microphone and camera are on, each
