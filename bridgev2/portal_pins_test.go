@@ -74,3 +74,14 @@ func TestWithReference(t *testing.T) {
 	assert.NotContains(t, beacon, "m.relates_to", "the converted part's own map is left alone")
 	assert.Contains(t, withReference(nil, "$info"), "m.relates_to")
 }
+
+func TestPartEventContent(t *testing.T) {
+	text := &event.MessageEventContent{MsgType: event.MsgText, Body: "hi"}
+	assert.Same(t, text, (&ConvertedMessagePart{Content: text}).eventContent().Parsed)
+	beacon := map[string]any{"org.matrix.msc3488.ts": 1}
+	// A beacon has no message content: an empty one would add "body" and "msgtype" to it.
+	got := (&ConvertedMessagePart{Extra: beacon}).eventContent()
+	assert.Nil(t, got.Parsed)
+	assert.Equal(t, beacon, got.Raw)
+	assert.Nil(t, (&ConvertedMessagePart{Content: text, ReferencesPrevious: true}).eventContent().Parsed)
+}

@@ -404,8 +404,9 @@ func (portal *Portal) compileBatchMessage(ctx context.Context, source *UserLogin
 	partMap := make(map[networkid.PartID]*database.Message, len(msg.Parts))
 	var firstPart *database.Message
 	for i, part := range msg.Parts {
-		if part.ReferencesPrevious {
-			// Batch sending can't send the state the part refers to (see ConvertedMessagePart.StateKey).
+		if part.ReferencesPrevious || part.Content == nil {
+			// Batch sending can't send the state the part refers to (see ConvertedMessagePart.StateKey),
+			// and a part without content has no message to fall back to.
 			continue
 		} else if part.StateKey != nil {
 			part = &ConvertedMessagePart{ID: part.ID, Type: event.EventMessage, Content: part.Content, DBMetadata: part.DBMetadata}

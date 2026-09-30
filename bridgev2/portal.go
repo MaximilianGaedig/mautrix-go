@@ -2993,7 +2993,7 @@ func (portal *Portal) sendConvertedMessage(
 				continue
 			}
 			part.Extra = withReference(part.Extra, prevEventID)
-		} else if part.StateKey == nil {
+		} else if part.StateKey == nil && part.Content != nil {
 			portal.applyRelationMeta(ctx, part.Content, replyTo, threadRoot, prevThreadEvent)
 			part.Content.BeeperDisappearingTimer = converted.Disappear.ToEventContent()
 		}
@@ -3022,11 +3022,7 @@ func (portal *Portal) sendConvertedMessage(
 				portal.ensureStateSendable(ctx, intent, part.Type)
 				resp, err = intent.SendState(ctx, portal.MXID, part.Type, *part.StateKey, &event.Content{Raw: part.Extra}, ts)
 			} else {
-				content := &event.Content{Parsed: part.Content, Raw: part.Extra}
-				if part.ReferencesPrevious {
-					content.Parsed = nil
-				}
-				resp, err = intent.SendMessage(ctx, portal.MXID, part.Type, content, &MatrixSendExtra{
+				resp, err = intent.SendMessage(ctx, portal.MXID, part.Type, part.eventContent(), &MatrixSendExtra{
 					Timestamp:   ts,
 					MessageMeta: dbMessage,
 					StreamOrder: streamOrder,
@@ -4585,6 +4581,16 @@ func pinChanges(previous, current []id.EventID) []pinChange {
 }
 
 // handleMatrixPins bridges a change to the room's pinned events, one message at a time.
+// eventContent is what a message part is sent as: its Content with Extra on top, or Extra alone for a part
+// without Content or one that refers to the part before it.
+func (cmp *ConvertedMessagePart) eventContent() *event.Content {
+	content := &event.Content{Raw: cmp.Extra}
+	if cmp.Content != nil && !cmp.ReferencesPrevious {
+		content.Parsed = cmp.Content
+	}
+	return content
+}
+
 // withReference makes content an m.reference to eventID.
 func withReference(content map[string]any, eventID string) map[string]any {
 	out := maps.Clone(content)

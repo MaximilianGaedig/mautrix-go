@@ -44,6 +44,9 @@ type ConvertedMessagePart struct {
 	ReferencesPrevious bool
 }
 
+// A part without Content, such as a live location's later position (beacon), is sent from Extra alone. It
+// gets no reply, thread or disappearing timer, and can't be backfilled.
+
 func (cmp *ConvertedMessagePart) ToEditPart(part *database.Message) *ConvertedEditPart {
 	if cmp == nil {
 		return nil
