@@ -32,3 +32,24 @@ func TestPinChanges(t *testing.T) {
 		assert.Empty(t, pinChanges([]id.EventID{a, b}, []id.EventID{b, a}))
 	})
 }
+
+func TestWithPinChange(t *testing.T) {
+	a, b, c := id.EventID("$a"), id.EventID("$b"), id.EventID("$c")
+	t.Run("pins to the end", func(t *testing.T) {
+		assert.Equal(t, []id.EventID{a, b, c}, withPinChange([]id.EventID{a, b}, c, true))
+	})
+	t.Run("re-pinning moves it to the end instead of adding it twice", func(t *testing.T) {
+		assert.Equal(t, []id.EventID{b, a}, withPinChange([]id.EventID{a, b}, a, true))
+	})
+	t.Run("unpins", func(t *testing.T) {
+		assert.Equal(t, []id.EventID{a, c}, withPinChange([]id.EventID{a, b, c}, b, false))
+	})
+	t.Run("unpinning something not pinned changes nothing", func(t *testing.T) {
+		assert.Equal(t, []id.EventID{a}, withPinChange([]id.EventID{a}, b, false))
+	})
+	t.Run("does not change the list it was given", func(t *testing.T) {
+		original := []id.EventID{a, b}
+		withPinChange(original, a, false)
+		assert.Equal(t, []id.EventID{a, b}, original)
+	})
+}
