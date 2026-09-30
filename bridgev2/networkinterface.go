@@ -455,6 +455,23 @@ type BackgroundSyncingNetworkAPI interface {
 	ConnectBackground(ctx context.Context, params *ConnectBackgroundParams) error
 }
 
+// PinHandlingNetworkAPI is an optional interface that network connectors can implement to bridge messages
+// being pinned and unpinned in a portal room.
+type PinHandlingNetworkAPI interface {
+	NetworkAPI
+	// HandleMatrixPin is called once per message pinned or unpinned by a change to m.room.pinned_events.
+	HandleMatrixPin(ctx context.Context, msg *MatrixPin) error
+}
+
+// MatrixPin is one message pinned or unpinned in a portal room.
+type MatrixPin struct {
+	MatrixEventBase[*event.PinnedEventsEventContent]
+	// The bridged message that was pinned or unpinned.
+	TargetMessage *database.Message
+	// Whether it was pinned (true) or unpinned (false).
+	Pinned bool
+}
+
 // ChatListSyncingNetworkAPI is an optional interface that network connectors can implement to go over
 // the login's whole chat list again on request, creating portals for chats that do not have one (for
 // example after a portal was deleted) and resyncing the ones that do. Connectors usually do this once,

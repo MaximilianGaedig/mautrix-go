@@ -918,6 +918,8 @@ func (portal *Portal) handleMatrixEvent(ctx context.Context, sender *User, evt *
 		return handleMatrixRoomMeta(portal, ctx, login, origSender, evt, isStateRequest, RoomNameHandlingNetworkAPI.HandleMatrixRoomName)
 	case event.StateTopic:
 		return handleMatrixRoomMeta(portal, ctx, login, origSender, evt, isStateRequest, RoomTopicHandlingNetworkAPI.HandleMatrixRoomTopic)
+	case event.StatePinnedEvents:
+		return portal.handleMatrixPins(ctx, login, origSender, evt)
 	case event.StateRoomAvatar:
 		return handleMatrixRoomMeta(portal, ctx, login, origSender, evt, isStateRequest, RoomAvatarHandlingNetworkAPI.HandleMatrixRoomAvatar)
 	case event.StateBeeperDisappearingTimer:
@@ -4378,6 +4380,10 @@ type ChatInfo struct {
 
 	ExcludeChangesFromTimeline bool
 
+	// The messages pinned in the chat, oldest pin first. Nil means unknown or unchanged; an empty list means
+	// nothing is pinned. Messages that were never bridged are left out of the room's pins.
+	PinnedMessages *[]networkid.MessageID
+
 	ExtraUpdates ExtraUpdater[*Portal]
 }
 
@@ -4434,6 +4440,113 @@ func (portal *Portal) updateTopic(
 		ctx, sender, ts, event.StateTopic, "", &event.TopicEventContent{Topic: topic}, excludeFromTimeline, nil,
 	)
 	return true
+}
+
+// updatePinnedMessages sets the room's pinned events to the given remote messages, skipping any that were
+// never bridged. The room's current pins are read first, so a resync that changes nothing sends nothing.
+func (portal *Portal) updatePinnedMessages(
+	ctx context.Context, ids []networkid.MessageID, sender MatrixAPI, ts time.Time, excludeFromTimeline bool,
+) bool {
+	if portal.MXID == "" {
+		return false
+	}
+	log := zerolog.Ctx(ctx)
+	pinned := make([]id.EventID, 0, len(ids))
+	for _, msgID := range ids {
+		msg, err := portal.Bridge.DB.Message.GetFirstPartByID(ctx, portal.Receiver, msgID)
+		if err != nil {
+			log.Err(err).Str("message_id", string(msgID)).Msg("Failed to get pinned message from database")
+		} else if msg != nil {
+			pinned = append(pinned, msg.MXID)
+		}
+	}
+	var current *event.Event
+	var err error
+	if stateful, ok := portal.Bridge.Matrix.(MatrixConnectorWithArbitraryRoomState); ok {
+		current, err = stateful.GetStateEvent(ctx, portal.MXID, event.StatePinnedEvents, "")
+	}
+	if err == nil && current != nil {
+		_ = current.Content.ParseRaw(event.StatePinnedEvents)
+		if content, ok := current.Content.Parsed.(*event.PinnedEventsEventContent); ok && slices.Equal(content.Pinned, pinned) {
+			return false
+		}
+	} else if len(pinned) == 0 {
+		// Nothing pinned and no pins in the room: nothing to say.
+		return false
+	}
+	return portal.sendRoomMeta(
+		ctx, sender, ts, event.StatePinnedEvents, "", &event.PinnedEventsEventContent{Pinned: pinned}, excludeFromTimeline, nil,
+	)
+}
+
+type pinChange struct {
+	eventID id.EventID
+	pinned  bool
+}
+
+// pinChanges is what changed between two versions of a room's pinned events: pins first, in their new
+// order, then unpins.
+func pinChanges(previous, current []id.EventID) []pinChange {
+	var changes []pinChange
+	for _, eventID := range current {
+		if !slices.Contains(previous, eventID) {
+			changes = append(changes, pinChange{eventID, true})
+		}
+	}
+	for _, eventID := range previous {
+		if !slices.Contains(current, eventID) {
+			changes = append(changes, pinChange{eventID, false})
+		}
+	}
+	return changes
+}
+
+// handleMatrixPins bridges a change to the room's pinned events, one message at a time.
+func (portal *Portal) handleMatrixPins(
+	ctx context.Context, sender *UserLogin, origSender *OrigSender, evt *event.Event,
+) EventHandlingResult {
+	if evt.StateKey == nil || *evt.StateKey != "" {
+		return EventHandlingResultFailed.WithMSSError(ErrInvalidStateKey)
+	}
+	api, ok := sender.Client.(PinHandlingNetworkAPI)
+	if !ok {
+		return EventHandlingResultIgnored.WithMSSError(fmt.Errorf("%w of type %s", ErrRoomMetadataNotSupported, evt.Type))
+	}
+	content, ok := evt.Content.Parsed.(*event.PinnedEventsEventContent)
+	if !ok {
+		return EventHandlingResultFailed.WithMSSError(fmt.Errorf("%w: %T", ErrUnexpectedParsedContentType, evt.Content.Parsed))
+	}
+	var previous []id.EventID
+	if evt.Unsigned.PrevContent != nil {
+		_ = evt.Unsigned.PrevContent.ParseRaw(evt.Type)
+		if prev, ok := evt.Unsigned.PrevContent.Parsed.(*event.PinnedEventsEventContent); ok {
+			previous = prev.Pinned
+		}
+	}
+	for _, ch := range pinChanges(previous, content.Pinned) {
+		msg, err := portal.Bridge.DB.Message.GetPartByMXID(ctx, ch.eventID)
+		if err != nil {
+			return EventHandlingResultFailed.WithMSSError(fmt.Errorf("failed to get pinned message: %w", err))
+		} else if msg == nil {
+			// Not a bridged message (e.g. a notice from the bridge): nothing to pin on the network.
+			continue
+		}
+		err = api.HandleMatrixPin(ctx, &MatrixPin{
+			MatrixEventBase: MatrixEventBase[*event.PinnedEventsEventContent]{
+				Event:      evt,
+				Content:    content,
+				Portal:     portal,
+				OrigSender: origSender,
+			},
+			TargetMessage: msg,
+			Pinned:        ch.pinned,
+		})
+		if err != nil {
+			return EventHandlingResultFailed.WithMSSError(err)
+		}
+	}
+	portal.sendSuccessStatus(ctx, evt, 0, "", nil)
+	return EventHandlingResultSuccess
 }
 
 func (portal *Portal) updateAvatar(
@@ -5246,6 +5359,9 @@ func (portal *Portal) UpdateInfo(ctx context.Context, info *ChatInfo, source *Us
 			SendNotice:          !info.ExcludeChangesFromTimeline,
 			ExcludeFromTimeline: info.ExcludeChangesFromTimeline,
 		}) || changed
+	}
+	if info.PinnedMessages != nil {
+		portal.updatePinnedMessages(ctx, *info.PinnedMessages, sender, ts, info.ExcludeChangesFromTimeline)
 	}
 	if info.JoinRule != nil {
 		// TODO change detection instead of spamming this every time?
