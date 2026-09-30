@@ -63,6 +63,7 @@ type RTCLeg struct {
 	receivers   map[*webrtc.TrackRemote]*webrtc.RTPReceiver
 	onPeers     func(identities []string)
 	onKeyframe  func()
+	onMedia     func(audioOn, videoOn bool)
 	closed      bool
 }
 
@@ -85,6 +86,12 @@ func JoinRTC(ctx context.Context, cfg RTCLegConfig) (*RTCLeg, error) {
 	cb.OnTrackSubscribed = l.onTrackSubscribed
 	cb.OnParticipantConnected = func(*lksdk.RemoteParticipant) { l.notifyPeers() }
 	cb.OnParticipantDisconnected = func(*lksdk.RemoteParticipant) { l.notifyPeers() }
+	// A camera turned off in Element Call is a muted track, not a stopped one: the far side of the
+	// bridge has to be told, or it keeps showing the last frame.
+	cb.OnTrackMuted = func(lksdk.TrackPublication, lksdk.Participant) { l.notifyMedia() }
+	cb.OnTrackUnmuted = func(lksdk.TrackPublication, lksdk.Participant) { l.notifyMedia() }
+	cb.OnTrackUnpublished = func(*lksdk.RemoteTrackPublication, *lksdk.RemoteParticipant) { l.notifyMedia() }
+	cb.OnTrackPublished = func(*lksdk.RemoteTrackPublication, *lksdk.RemoteParticipant) { l.notifyMedia() }
 	cb.OnLocalTrackSubscribed = func(pub *lksdk.LocalTrackPublication, _ *lksdk.LocalParticipant) {
 		// A Matrix participant started watching our video: it needs a keyframe to start decoding.
 		if pub.Kind() == lksdk.TrackKindVideo {
@@ -208,6 +215,38 @@ func (l *RTCLeg) OnKeyframeRequest(fn func()) {
 	l.mu.Lock()
 	l.onKeyframe = fn
 	l.mu.Unlock()
+}
+
+// OnMediaState is called with whether the other participants' microphone and camera are on, each
+// time one is muted, unmuted, published or unpublished.
+func (l *RTCLeg) OnMediaState(fn func(audioOn, videoOn bool)) {
+	l.mu.Lock()
+	l.onMedia = fn
+	l.mu.Unlock()
+}
+
+// MediaState says whether any other participant's microphone and camera are on.
+func (l *RTCLeg) MediaState() (audioOn, videoOn bool) {
+	if l.room == nil {
+		return false, false
+	}
+	for _, p := range l.room.GetRemoteParticipants() {
+		if l.accept != nil && !l.accept(p.Identity()) {
+			continue
+		}
+		audioOn = audioOn || p.IsMicrophoneEnabled()
+		videoOn = videoOn || p.IsCameraEnabled()
+	}
+	return audioOn, videoOn
+}
+
+func (l *RTCLeg) notifyMedia() {
+	l.mu.Lock()
+	fn := l.onMedia
+	l.mu.Unlock()
+	if fn != nil {
+		fn(l.MediaState())
+	}
 }
 
 // Peers lists the other participants' identities.
