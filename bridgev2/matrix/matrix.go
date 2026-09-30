@@ -105,6 +105,24 @@ func (br *Connector) handleAccountDataEvent(ctx context.Context, evt *event.Even
 	br.Bridge.QueueMatrixEvent(ctx, evt)
 }
 
+// handleIgnoredUserList turns the user's ignore list, handed over by the homeserver, into blocks on the
+// networks (bridgev2.UserBlockingNetworkAPI).
+func (br *Connector) handleIgnoredUserList(ctx context.Context, evt *event.Event) {
+	if evt.Sender == "" || br.shouldIgnoreEventFromUser(evt.Sender) {
+		return
+	}
+	evt.Type.Class = event.AccountDataEventType
+	evt.Content.Parsed = nil
+	if err := evt.Content.ParseRaw(evt.Type); err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to parse ignore list")
+		return
+	}
+	if evt.Unsigned.PrevContent != nil {
+		evt.Unsigned.PrevContent.Parsed = nil
+	}
+	go br.Bridge.HandleIgnoredUserList(context.WithoutCancel(ctx), evt)
+}
+
 // isOwnAccountDataEcho reports whether account data is the bridge's own write coming back: the double puppet
 // marks marked-unread content, and each tag it adds, with the double puppet value.
 func isOwnAccountDataEcho(evt *event.Event, doublePuppetValue string) bool {

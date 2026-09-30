@@ -165,6 +165,7 @@ func (br *Connector) Init(bridge *bridgev2.Bridge) {
 	for _, evtType := range bridgedAccountData {
 		br.EventProcessor.On(event.Type{Type: evtType.Type, Class: event.EphemeralEventType}, br.handleAccountDataEvent)
 	}
+	br.EventProcessor.On(event.Type{Type: event.AccountDataIgnoredUserList.Type, Class: event.EphemeralEventType}, br.handleIgnoredUserList)
 	br.Bot = br.AS.BotIntent()
 	br.Crypto = NewCryptoHelper(br)
 	br.Bridge.Commands.(*commands.Processor).AddHandlers(

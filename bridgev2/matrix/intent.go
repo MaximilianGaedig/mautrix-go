@@ -173,6 +173,16 @@ func (as *ASIntent) SetRoomAccountData(ctx context.Context, roomID id.RoomID, ev
 	return as.Matrix.SetRoomAccountData(ctx, roomID, eventType, content)
 }
 
+var _ bridgev2.GlobalAccountDataMatrixAPI = (*ASIntent)(nil)
+
+func (as *ASIntent) GetAccountData(ctx context.Context, eventType string, into any) error {
+	return as.Matrix.GetAccountData(ctx, eventType, into)
+}
+
+func (as *ASIntent) SetAccountData(ctx context.Context, eventType string, content any) error {
+	return as.Matrix.SetAccountData(ctx, eventType, content)
+}
+
 func (as *ASIntent) GetRoomAccountData(ctx context.Context, roomID id.RoomID, eventType string, into any) error {
 	return as.Matrix.GetRoomAccountData(ctx, roomID, eventType, into)
 }
