@@ -240,12 +240,15 @@ func (l *RTCLeg) MediaState() (audioOn, videoOn bool) {
 	return audioOn, videoOn
 }
 
+// notifyMedia runs on its own goroutine: the SDK calls the track callbacks with its room lock held
+// (a participant joining is added under it), and MediaState takes that lock again - called inline,
+// the first Matrix participant to join froze the whole leg.
 func (l *RTCLeg) notifyMedia() {
 	l.mu.Lock()
 	fn := l.onMedia
 	l.mu.Unlock()
 	if fn != nil {
-		fn(l.MediaState())
+		go func() { fn(l.MediaState()) }()
 	}
 }
 
