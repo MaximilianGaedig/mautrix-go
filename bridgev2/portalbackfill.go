@@ -404,6 +404,12 @@ func (portal *Portal) compileBatchMessage(ctx context.Context, source *UserLogin
 	partMap := make(map[networkid.PartID]*database.Message, len(msg.Parts))
 	var firstPart *database.Message
 	for i, part := range msg.Parts {
+		if part.ReferencesPrevious {
+			// Batch sending can't send the state the part refers to (see ConvertedMessagePart.StateKey).
+			continue
+		} else if part.StateKey != nil {
+			part = &ConvertedMessagePart{ID: part.ID, Type: event.EventMessage, Content: part.Content, DBMetadata: part.DBMetadata}
+		}
 		partIDs = append(partIDs, part.ID)
 		portal.applyRelationMeta(ctx, part.Content, replyTo, threadRoot, prevThreadEvent)
 		part.Content.BeeperDisappearingTimer = msg.Disappear.ToEventContent()

@@ -2980,12 +2980,20 @@ func (portal *Portal) sendConvertedMessage(
 	)
 	output := make([]*database.Message, 0, len(converted.Parts))
 	var errorList []error
+	// The last part sent; `id` is the message ID here, so the event ID is kept as a string.
+	var prevEventID string
 	for i, part := range converted.Parts {
 		if ctx.Err() != nil {
 			errorList = append(errorList, ctx.Err())
 			break
 		}
-		if part.StateKey == nil {
+		if part.ReferencesPrevious {
+			if prevEventID == "" {
+				log.Warn().Str("part_id", string(part.ID)).Msg("Not sending part that refers to a part that wasn't sent")
+				continue
+			}
+			part.Extra = withReference(part.Extra, prevEventID)
+		} else if part.StateKey == nil {
 			portal.applyRelationMeta(ctx, part.Content, replyTo, threadRoot, prevThreadEvent)
 			part.Content.BeeperDisappearingTimer = converted.Disappear.ToEventContent()
 		}
@@ -3014,10 +3022,11 @@ func (portal *Portal) sendConvertedMessage(
 				portal.ensureStateSendable(ctx, intent, part.Type)
 				resp, err = intent.SendState(ctx, portal.MXID, part.Type, *part.StateKey, &event.Content{Raw: part.Extra}, ts)
 			} else {
-				resp, err = intent.SendMessage(ctx, portal.MXID, part.Type, &event.Content{
-					Parsed: part.Content,
-					Raw:    part.Extra,
-				}, &MatrixSendExtra{
+				content := &event.Content{Parsed: part.Content, Raw: part.Extra}
+				if part.ReferencesPrevious {
+					content.Parsed = nil
+				}
+				resp, err = intent.SendMessage(ctx, portal.MXID, part.Type, content, &MatrixSendExtra{
 					Timestamp:   ts,
 					MessageMeta: dbMessage,
 					StreamOrder: streamOrder,
@@ -3034,6 +3043,7 @@ func (portal *Portal) sendConvertedMessage(
 				Str("part_id", string(part.ID)).
 				Msg("Sent message part to Matrix")
 			dbMessage.MXID = resp.EventID
+			prevEventID = resp.EventID.String()
 		}
 		if save {
 			err := portal.Bridge.DB.Message.Insert(ctx, dbMessage)
@@ -4575,6 +4585,16 @@ func pinChanges(previous, current []id.EventID) []pinChange {
 }
 
 // handleMatrixPins bridges a change to the room's pinned events, one message at a time.
+// withReference makes content an m.reference to eventID.
+func withReference(content map[string]any, eventID string) map[string]any {
+	out := maps.Clone(content)
+	if out == nil {
+		out = make(map[string]any, 1)
+	}
+	out["m.relates_to"] = map[string]any{"rel_type": event.RelReference, "event_id": eventID}
+	return out
+}
+
 // ensureStateSendable lets intent send eventType as state in the portal room. Rooms need state_default (50)
 // for state events they don't list, which ghosts don't have, so the bot lowers what that event type needs
 // to intent's level.

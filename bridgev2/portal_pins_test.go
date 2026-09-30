@@ -65,3 +65,12 @@ func TestLowerEventLevelFor(t *testing.T) {
 	// Other state events keep their level.
 	assert.Equal(t, 50, pl.GetEventLevel(event.StateRoomName))
 }
+
+func TestWithReference(t *testing.T) {
+	beacon := map[string]any{"org.matrix.msc3488.ts": 1}
+	got := withReference(beacon, "$info")
+	assert.Equal(t, map[string]any{"rel_type": event.RelReference, "event_id": "$info"}, got["m.relates_to"])
+	assert.Equal(t, 1, got["org.matrix.msc3488.ts"])
+	assert.NotContains(t, beacon, "m.relates_to", "the converted part's own map is left alone")
+	assert.Contains(t, withReference(nil, "$info"), "m.relates_to")
+}

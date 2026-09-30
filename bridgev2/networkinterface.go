@@ -35,8 +35,13 @@ type ConvertedMessagePart struct {
 	DontBridge bool
 	// StateKey sends the part as a state event with this state key instead of a message event, for messages
 	// that start as room state, like an MSC3672 live location (beacon_info, keyed by the sharer). The state
-	// event's content is Extra; Content is not used.
+	// event's content is Extra. Content is the fallback sent as an ordinary message where state can't be
+	// sent, which is in backfill.
 	StateKey *string
+	// ReferencesPrevious makes the part an m.reference to the part before it: the first position (beacon) of
+	// a live location refers to the beacon_info that started it. Such a part is sent from Extra alone, and
+	// isn't sent in backfill, where the part before it is only a fallback.
+	ReferencesPrevious bool
 }
 
 func (cmp *ConvertedMessagePart) ToEditPart(part *database.Message) *ConvertedEditPart {
