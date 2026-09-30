@@ -10,6 +10,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"net/http"
@@ -276,7 +277,12 @@ func (ghost *Ghost) UpdateContactInfo(ctx context.Context, identifiers []string,
 	if !ghost.prepareContactInfo(identifiers, isBot, extraProfile) {
 		return false
 	}
-	if err := ghost.Intent.SetExtraProfileMeta(ctx, ghost.getExtraProfileMeta()); err != nil {
+	if err := ghost.Intent.SetExtraProfileMeta(ctx, ghost.getExtraProfileMeta()); errors.Is(err, ErrExtraProfileMetaUnsupported) {
+		// Nothing carried the fields, so the ghost stays unmarked and the next sync tries again -
+		// which is what makes them appear by themselves once the homeserver or the config can take
+		// them, rather than needing every ghost repaired by hand.
+		zerolog.Ctx(ctx).Debug().Msg("Not setting extra profile metadata: unsupported")
+	} else if err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to set extra profile metadata")
 	} else {
 		ghost.ContactInfoSet = true
@@ -403,7 +409,12 @@ func (ghost *Ghost) pushProfileChanges(ctx context.Context, nameChanged, avatarC
 			}
 		}
 		if contactInfoChanged {
-			if err := ghost.Intent.SetExtraProfileMeta(ctx, ghost.getExtraProfileMeta()); err != nil {
+			if err := ghost.Intent.SetExtraProfileMeta(ctx, ghost.getExtraProfileMeta()); errors.Is(err, ErrExtraProfileMetaUnsupported) {
+				// Nothing carried the fields, so the ghost stays unmarked and the next sync tries again -
+				// which is what makes them appear by themselves once the homeserver or the config can take
+				// them, rather than needing every ghost repaired by hand.
+				zerolog.Ctx(ctx).Debug().Msg("Not setting extra profile metadata: unsupported")
+			} else if err != nil {
 				zerolog.Ctx(ctx).Err(err).Msg("Failed to set extra profile metadata")
 			} else {
 				ghost.ContactInfoSet = true

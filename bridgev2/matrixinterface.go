@@ -8,6 +8,7 @@ package bridgev2
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -38,6 +39,13 @@ type BeeperStreamPublisher interface {
 	Publish(ctx context.Context, roomID id.RoomID, eventID id.EventID, delta map[string]any) error
 	Unregister(roomID id.RoomID, eventID id.EventID)
 }
+
+// ErrExtraProfileMetaUnsupported means the extra profile fields were not written because nothing can
+// carry them: the homeserver advertises neither arbitrary profile field support, or the bridge is
+// configured not to set them. It is not a failure, but it must not be reported as success either - a
+// ghost marked as pushed is never revisited, so returning nil here left every ghost's identifiers,
+// network and remote ID unpublished for good once the flag was later turned on.
+var ErrExtraProfileMetaUnsupported = errors.New("extra profile metadata is not supported")
 
 type MatrixConnector interface {
 	Init(*Bridge)
@@ -211,6 +219,9 @@ type MatrixAPI interface {
 
 	SetDisplayName(ctx context.Context, name string) error
 	SetAvatarURL(ctx context.Context, avatarURL id.ContentURIString) error
+	// SetExtraProfileMeta writes the ghost's extra profile fields. It must return
+	// ErrExtraProfileMetaUnsupported rather than nil when it wrote nothing, so that the caller does not
+	// record a push that never happened.
 	SetExtraProfileMeta(ctx context.Context, data any) error
 	SetProfile(ctx context.Context, data any) error
 

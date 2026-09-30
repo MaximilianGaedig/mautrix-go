@@ -539,8 +539,9 @@ func (as *ASIntent) SetExtraProfileMeta(ctx context.Context, data any) error {
 				return fmt.Errorf("failed to set profile field %q: %w", key, err)
 			}
 		}
+		return nil
 	}
-	return nil
+	return bridgev2.ErrExtraProfileMetaUnsupported
 }
 
 func (as *ASIntent) GetMXID() id.UserID {
