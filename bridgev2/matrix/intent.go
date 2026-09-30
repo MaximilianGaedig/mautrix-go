@@ -163,9 +163,7 @@ func (as *ASIntent) MarkRead(ctx context.Context, roomID id.RoomID, eventID id.E
 	} else {
 		err = as.Matrix.SetReadMarkers(ctx, roomID, &req)
 		if err == nil && as.Matrix.IsCustomPuppet && as.Connector.Config.Homeserver.Software != bridgeconfig.SoftwareHungry {
-			err = as.Matrix.SetRoomAccountData(ctx, roomID, event.AccountDataMarkedUnread.Type, &event.MarkedUnreadEventContent{
-				Unread: false,
-			})
+			err = as.Matrix.SetRoomAccountData(ctx, roomID, event.AccountDataMarkedUnread.Type, as.markedUnreadContent(false))
 		}
 	}
 	return
@@ -188,10 +186,18 @@ func (as *ASIntent) MarkUnread(ctx context.Context, roomID id.RoomID, unread boo
 			MarkedUnread: new(unread),
 		})
 	} else {
-		return as.Matrix.SetRoomAccountData(ctx, roomID, event.AccountDataMarkedUnread.Type, &event.MarkedUnreadEventContent{
-			Unread: unread,
-		})
+		return as.Matrix.SetRoomAccountData(ctx, roomID, event.AccountDataMarkedUnread.Type, as.markedUnreadContent(unread))
 	}
+}
+
+// markedUnreadContent is marked-unread account data written by the bridge, marked as such so that the copy
+// the homeserver hands back to the bridge isn't bridged to the network again.
+func (as *ASIntent) markedUnreadContent(unread bool) map[string]any {
+	content := map[string]any{"unread": unread}
+	if as.Connector.AS.DoublePuppetValue != "" {
+		content[appservice.DoublePuppetKey] = as.Connector.AS.DoublePuppetValue
+	}
+	return content
 }
 
 func (as *ASIntent) MarkTyping(ctx context.Context, roomID id.RoomID, typingType bridgev2.TypingType, timeout time.Duration) error {

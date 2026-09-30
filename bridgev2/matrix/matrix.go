@@ -8,6 +8,7 @@ package matrix
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
@@ -79,6 +80,61 @@ func (br *Connector) handleEphemeralEvent(ctx context.Context, evt *event.Event)
 		typingContent.UserIDs = slices.DeleteFunc(typingContent.UserIDs, br.shouldIgnoreEventFromUser)
 	}
 	br.Bridge.QueueMatrixEvent(ctx, evt)
+}
+
+// Room account data a homeserver may hand the bridge as ephemeral events (with a sender and a room), so
+// that tagging, marking unread or muting a room in Matrix reaches the network.
+var bridgedAccountData = []event.Type{event.AccountDataRoomTags, event.AccountDataMarkedUnread, event.AccountDataBeeperMute}
+
+func (br *Connector) handleAccountDataEvent(ctx context.Context, evt *event.Event) {
+	if evt.Sender == "" || evt.RoomID == "" || br.shouldIgnoreEventFromUser(evt.Sender) {
+		return
+	}
+	if isOwnAccountDataEcho(evt, br.AS.DoublePuppetValue) {
+		return
+	}
+	evt.Type.Class = event.AccountDataEventType
+	evt.Content.Parsed = nil
+	if err := evt.Content.ParseRaw(evt.Type); err != nil {
+		zerolog.Ctx(ctx).Warn().Err(err).Str("event_type", evt.Type.Type).Msg("Failed to parse account data")
+		return
+	}
+	if evt.Unsigned.PrevContent != nil {
+		evt.Unsigned.PrevContent.Parsed = nil
+	}
+	br.Bridge.QueueMatrixEvent(ctx, evt)
+}
+
+// isOwnAccountDataEcho reports whether account data is the bridge's own write coming back: the double puppet
+// marks marked-unread content, and each tag it adds, with the double puppet value.
+func isOwnAccountDataEcho(evt *event.Event, doublePuppetValue string) bool {
+	if doublePuppetValue == "" {
+		return false
+	}
+	if evt.Content.Raw[appservice.DoublePuppetKey] == doublePuppetValue {
+		return true
+	}
+	if evt.Type.Type != event.AccountDataRoomTags.Type {
+		return false
+	}
+	var current, prev event.TagEventContent
+	if err := json.Unmarshal(evt.Content.VeryRaw, &current); err != nil {
+		return false
+	}
+	if evt.Unsigned.PrevContent != nil {
+		_ = json.Unmarshal(evt.Unsigned.PrevContent.VeryRaw, &prev)
+	}
+	added := false
+	for tag, meta := range current.Tags {
+		if _, had := prev.Tags[tag]; had {
+			continue
+		}
+		added = true
+		if meta.MauDoublePuppetSource != doublePuppetValue {
+			return false
+		}
+	}
+	return added
 }
 
 func (br *Connector) handleEncryptedEvent(ctx context.Context, evt *event.Event) {
