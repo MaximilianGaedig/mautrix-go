@@ -33,6 +33,10 @@ type ConvertedMessagePart struct {
 	Extra      map[string]any
 	DBMetadata any
 	DontBridge bool
+	// StateKey sends the part as a state event with this state key instead of a message event, for messages
+	// that start as room state, like an MSC3672 live location (beacon_info, keyed by the sharer). The state
+	// event's content is Extra; Content is not used.
+	StateKey *string
 }
 
 func (cmp *ConvertedMessagePart) ToEditPart(part *database.Message) *ConvertedEditPart {

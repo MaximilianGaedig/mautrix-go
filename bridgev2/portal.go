@@ -2985,8 +2985,10 @@ func (portal *Portal) sendConvertedMessage(
 			errorList = append(errorList, ctx.Err())
 			break
 		}
-		portal.applyRelationMeta(ctx, part.Content, replyTo, threadRoot, prevThreadEvent)
-		part.Content.BeeperDisappearingTimer = converted.Disappear.ToEventContent()
+		if part.StateKey == nil {
+			portal.applyRelationMeta(ctx, part.Content, replyTo, threadRoot, prevThreadEvent)
+			part.Content.BeeperDisappearingTimer = converted.Disappear.ToEventContent()
+		}
 		dbMessage := &database.Message{
 			ID:               id,
 			PartID:           part.ID,
@@ -3006,15 +3008,22 @@ func (portal *Portal) sendConvertedMessage(
 				Str("part_id", string(part.ID)).
 				Msg("Not bridging message part with DontBridge flag to Matrix")
 		} else {
-			resp, err := intent.SendMessage(ctx, portal.MXID, part.Type, &event.Content{
-				Parsed: part.Content,
-				Raw:    part.Extra,
-			}, &MatrixSendExtra{
-				Timestamp:   ts,
-				MessageMeta: dbMessage,
-				StreamOrder: streamOrder,
-				PartIndex:   i,
-			})
+			var resp *mautrix.RespSendEvent
+			var err error
+			if part.StateKey != nil {
+				portal.ensureStateSendable(ctx, intent, part.Type)
+				resp, err = intent.SendState(ctx, portal.MXID, part.Type, *part.StateKey, &event.Content{Raw: part.Extra}, ts)
+			} else {
+				resp, err = intent.SendMessage(ctx, portal.MXID, part.Type, &event.Content{
+					Parsed: part.Content,
+					Raw:    part.Extra,
+				}, &MatrixSendExtra{
+					Timestamp:   ts,
+					MessageMeta: dbMessage,
+					StreamOrder: streamOrder,
+					PartIndex:   i,
+				})
+			}
 			if err != nil {
 				logContext(log.Err(err)).Str("part_id", string(part.ID)).Msg("Failed to send message part to Matrix")
 				errorList = append(errorList, fmt.Errorf("failed to send message part to Matrix: %w", err))
@@ -4566,6 +4575,35 @@ func pinChanges(previous, current []id.EventID) []pinChange {
 }
 
 // handleMatrixPins bridges a change to the room's pinned events, one message at a time.
+// ensureStateSendable lets intent send eventType as state in the portal room. Rooms need state_default (50)
+// for state events they don't list, which ghosts don't have, so the bot lowers what that event type needs
+// to intent's level.
+func (portal *Portal) ensureStateSendable(ctx context.Context, intent MatrixAPI, eventType event.Type) {
+	pl, err := portal.Bridge.Matrix.GetPowerLevels(ctx, portal.MXID)
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Msg("Failed to get power levels to send state")
+		return
+	}
+	if !lowerEventLevelFor(pl, eventType, intent.GetMXID()) {
+		return
+	}
+	_, err = portal.Bridge.Bot.SendState(ctx, portal.MXID, event.StatePowerLevels, "", &event.Content{Parsed: pl}, time.Time{})
+	if err != nil {
+		zerolog.Ctx(ctx).Err(err).Stringer("event_type", eventType).Msg("Failed to let ghosts send state event")
+	}
+}
+
+// lowerEventLevelFor lowers the level eventType needs to userID's, if it is higher. It reports whether it
+// changed pl.
+func lowerEventLevelFor(pl *event.PowerLevelsEventContent, eventType event.Type, userID id.UserID) bool {
+	level := pl.GetUserLevel(userID)
+	if pl.GetEventLevel(eventType) <= level {
+		return false
+	}
+	pl.SetEventLevel(eventType, level)
+	return true
+}
+
 func (portal *Portal) handleMatrixPollEnd(
 	ctx context.Context, sender *UserLogin, origSender *OrigSender, evt *event.Event,
 ) EventHandlingResult {

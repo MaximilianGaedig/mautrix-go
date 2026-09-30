@@ -251,6 +251,11 @@ var (
 	EventUnstablePollStart    = Type{Type: "org.matrix.msc3381.poll.start", Class: MessageEventType}
 	EventUnstablePollResponse = Type{Type: "org.matrix.msc3381.poll.response", Class: MessageEventType}
 	EventUnstablePollEnd      = Type{Type: "org.matrix.msc3381.poll.end", Class: MessageEventType}
+
+	// MSC3672 live location sharing: a beacon_info state event (keyed by the sharer) starts and stops a
+	// share, and each position is a beacon message event referencing it.
+	StateUnstableBeaconInfo = Type{Type: "org.matrix.msc3672.beacon_info", Class: StateEventType}
+	EventUnstableBeacon     = Type{Type: "org.matrix.msc3672.beacon", Class: MessageEventType}
 )
 
 // Ephemeral events

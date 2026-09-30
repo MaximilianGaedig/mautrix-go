@@ -11,6 +11,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
+	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
 
@@ -52,4 +53,15 @@ func TestWithPinChange(t *testing.T) {
 		withPinChange(original, a, false)
 		assert.Equal(t, []id.EventID{a, b}, original)
 	})
+}
+
+func TestLowerEventLevelFor(t *testing.T) {
+	ghost := id.UserID("@ghost:example.org")
+	pl := &event.PowerLevelsEventContent{Users: map[id.UserID]int{"@bot:example.org": 100}}
+	// Unlisted state events need state_default (50): a ghost at 0 can't send them until it's lowered.
+	assert.True(t, lowerEventLevelFor(pl, event.StateUnstableBeaconInfo, ghost))
+	assert.Equal(t, 0, pl.GetEventLevel(event.StateUnstableBeaconInfo))
+	assert.False(t, lowerEventLevelFor(pl, event.StateUnstableBeaconInfo, ghost), "already sendable")
+	// Other state events keep their level.
+	assert.Equal(t, 50, pl.GetEventLevel(event.StateRoomName))
 }
