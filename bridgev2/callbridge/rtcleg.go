@@ -60,13 +60,16 @@ type RTCLeg struct {
 	screen      *lksdk.LocalTrack
 	remoteAudio chan *webrtc.TrackRemote
 	remoteVideo chan *webrtc.TrackRemote
-	owners      map[*webrtc.TrackRemote]*lksdk.RemoteParticipant
-	receivers   map[*webrtc.TrackRemote]*webrtc.RTPReceiver
-	onPeers     func(identities []string)
-	onKeyframe  func()
-	onScreenKey func()
-	onMedia     func(audioOn, videoOn bool)
-	closed      bool
+	// remoteScreen is a Matrix participant's shared screen: a track of its own beside the camera,
+	// so sharing a screen doesn't take the camera's place (or wait behind it).
+	remoteScreen chan *webrtc.TrackRemote
+	owners       map[*webrtc.TrackRemote]*lksdk.RemoteParticipant
+	receivers    map[*webrtc.TrackRemote]*webrtc.RTPReceiver
+	onPeers      func(identities []string)
+	onKeyframe   func()
+	onScreenKey  func()
+	onMedia      func(audioOn, videoOn bool)
+	closed       bool
 }
 
 // quietSDK stops the LiveKit SDK logging every connection-state change to stderr (its default); its
@@ -77,12 +80,13 @@ var quietSDK sync.Once
 func JoinRTC(ctx context.Context, cfg RTCLegConfig) (*RTCLeg, error) {
 	quietSDK.Do(func() { lksdk.SetLogger(protoLogger.LogRLogger(logr.Discard())) })
 	l := &RTCLeg{
-		log:         cfg.Log,
-		accept:      cfg.Accept,
-		remoteAudio: make(chan *webrtc.TrackRemote, 1),
-		remoteVideo: make(chan *webrtc.TrackRemote, 1),
-		owners:      map[*webrtc.TrackRemote]*lksdk.RemoteParticipant{},
-		receivers:   map[*webrtc.TrackRemote]*webrtc.RTPReceiver{},
+		log:          cfg.Log,
+		accept:       cfg.Accept,
+		remoteAudio:  make(chan *webrtc.TrackRemote, 1),
+		remoteVideo:  make(chan *webrtc.TrackRemote, 1),
+		remoteScreen: make(chan *webrtc.TrackRemote, 1),
+		owners:       map[*webrtc.TrackRemote]*lksdk.RemoteParticipant{},
+		receivers:    map[*webrtc.TrackRemote]*webrtc.RTPReceiver{},
 	}
 	cb := lksdk.NewRoomCallback()
 	cb.OnTrackSubscribed = l.onTrackSubscribed
@@ -202,6 +206,56 @@ func (l *RTCLeg) RemoteVideo(ctx context.Context) (*webrtc.TrackRemote, error) {
 	return waitTrack(ctx, l.remoteVideo)
 }
 
+// RemoteScreen waits for a Matrix participant's shared screen.
+func (l *RTCLeg) RemoteScreen(ctx context.Context) (*webrtc.TrackRemote, error) {
+	return waitTrack(ctx, l.remoteScreen)
+}
+
+// ScreenOn says whether any other participant is sharing their screen.
+func (l *RTCLeg) ScreenOn() bool {
+	if l.room == nil {
+		return false
+	}
+	for _, p := range l.room.GetRemoteParticipants() {
+		if l.accept != nil && !l.accept(p.Identity()) {
+			continue
+		}
+		if p.IsScreenShareEnabled() {
+			return true
+		}
+	}
+	return false
+}
+
+// trackRoute is where a subscribed MatrixRTC track goes.
+type trackRoute int
+
+const (
+	routeAudio trackRoute = iota
+	routeVideo
+	routeScreen
+	// routeNone is a track the bridge has no place for: a shared screen's sound, which the other
+	// network has no track for and which must not take the microphone's place.
+	routeNone
+)
+
+// routeOf sorts a track by what it is a picture or sound of, not only by its kind: a shared screen
+// is video like a camera, and its sound is audio like a microphone, and each used to land where
+// the camera and the microphone go - the screen waiting behind the camera, never sent, and its
+// sound replacing the voice.
+func routeOf(kind webrtc.RTPCodecType, source livekit.TrackSource) trackRoute {
+	switch source {
+	case livekit.TrackSource_SCREEN_SHARE:
+		return routeScreen
+	case livekit.TrackSource_SCREEN_SHARE_AUDIO:
+		return routeNone
+	}
+	if kind == webrtc.RTPCodecTypeVideo {
+		return routeVideo
+	}
+	return routeAudio
+}
+
 func waitTrack(ctx context.Context, ch chan *webrtc.TrackRemote) (*webrtc.TrackRemote, error) {
 	select {
 	case tr, ok := <-ch:
@@ -316,10 +370,18 @@ func (l *RTCLeg) onTrackSubscribed(track *webrtc.TrackRemote, pub *lksdk.RemoteT
 		return
 	}
 	l.log.Debug().Str("participant", rp.Identity()).Str("kind", track.Kind().String()).
-		Str("codec", track.Codec().MimeType).Msg("Subscribed to MatrixRTC track")
-	ch := l.remoteAudio
-	if track.Kind() == webrtc.RTPCodecTypeVideo {
+		Stringer("source", pub.Source()).Str("codec", track.Codec().MimeType).Msg("Subscribed to MatrixRTC track")
+	var ch chan *webrtc.TrackRemote
+	switch routeOf(track.Kind(), pub.Source()) {
+	case routeAudio:
+		ch = l.remoteAudio
+	case routeVideo:
 		ch = l.remoteVideo
+	case routeScreen:
+		ch = l.remoteScreen
+	case routeNone:
+		_ = pub.SetSubscribed(false)
+		return
 	}
 	l.mu.Lock()
 	defer l.mu.Unlock()

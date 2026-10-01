@@ -111,15 +111,25 @@ func DisableVideoSending(sdp string) string {
 // described by sdp: VP8 when offered (every browser running Element has it),
 // else H264, else "" (no video). It only looks at the video m-section.
 func PickVideoCodec(sdp string) string {
+	return PickVideoCodecPreferring(sdp, webrtc.MimeTypeVP8)
+}
+
+// PickVideoCodecPreferring is PickVideoCodec with the codec to take when both are offered. A bridge
+// relays video as it is, so both legs have to speak the one codec: a call whose Matrix side sends
+// H264 (Element Call set to, for the phones that take nothing else) needs H264 on the other leg too,
+// even when the other network also offers VP8.
+func PickVideoCodecPreferring(sdp, prefer string) string {
 	codecs := videoRtpmap(sdp)
-	switch {
-	case codecs["VP8"]:
-		return webrtc.MimeTypeVP8
-	case codecs["H264"]:
-		return webrtc.MimeTypeH264
-	default:
-		return ""
+	order := []string{webrtc.MimeTypeVP8, webrtc.MimeTypeH264}
+	if strings.EqualFold(prefer, webrtc.MimeTypeH264) {
+		order = []string{webrtc.MimeTypeH264, webrtc.MimeTypeVP8}
 	}
+	for _, mime := range order {
+		if codecs[strings.TrimPrefix(mime, "video/")] {
+			return mime
+		}
+	}
+	return ""
 }
 
 // SendsVideo reports whether sdp has a video m-section that sends (sendrecv

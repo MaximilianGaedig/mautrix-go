@@ -27,7 +27,9 @@ import (
 	"time"
 
 	"github.com/livekit/protocol/auth"
+	"github.com/livekit/protocol/livekit"
 	"github.com/pion/rtp"
+	"github.com/pion/webrtc/v4"
 	"github.com/rs/zerolog"
 )
 
@@ -146,6 +148,29 @@ func TestRTCLegRelaysAudio(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		if _, _, err := track.ReadRTP(); err != nil {
 			t.Fatalf("read: %v", err)
+		}
+	}
+}
+
+// A screen shared in Element Call is video like the camera, and its sound is audio like the
+// microphone: sorted by kind alone, the screen queued behind the camera and was never sent, and its
+// sound took the voice's place.
+func TestRouteOf(t *testing.T) {
+	for _, c := range []struct {
+		kind   webrtc.RTPCodecType
+		source livekit.TrackSource
+		want   trackRoute
+	}{
+		{webrtc.RTPCodecTypeAudio, livekit.TrackSource_MICROPHONE, routeAudio},
+		{webrtc.RTPCodecTypeVideo, livekit.TrackSource_CAMERA, routeVideo},
+		{webrtc.RTPCodecTypeVideo, livekit.TrackSource_SCREEN_SHARE, routeScreen},
+		{webrtc.RTPCodecTypeAudio, livekit.TrackSource_SCREEN_SHARE_AUDIO, routeNone},
+		// A client that names no source is sorted as before.
+		{webrtc.RTPCodecTypeVideo, livekit.TrackSource_UNKNOWN, routeVideo},
+		{webrtc.RTPCodecTypeAudio, livekit.TrackSource_UNKNOWN, routeAudio},
+	} {
+		if got := routeOf(c.kind, c.source); got != c.want {
+			t.Errorf("routeOf(%v, %v) = %v, want %v", c.kind, c.source, got, c.want)
 		}
 	}
 }

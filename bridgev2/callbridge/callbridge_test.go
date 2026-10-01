@@ -423,6 +423,15 @@ func TestVideoSDPHelpers(t *testing.T) {
 	if PickVideoCodec(web) != webrtc.MimeTypeVP8 || !SendsVideo(web) {
 		t.Fatal("web video offer")
 	}
+	// A MatrixRTC call sends H264 (Element Call is set to, for the phones that take nothing else),
+	// so the other leg takes H264 too where it is offered beside VP8 - else nothing can be relayed.
+	if PickVideoCodecPreferring(web, webrtc.MimeTypeH264) != webrtc.MimeTypeH264 {
+		t.Fatal("H264 preferred on a web offer")
+	}
+	vp8 := strings.Replace(web, "a=rtpmap:108 H264/90000\r\n", "", 1)
+	if PickVideoCodecPreferring(vp8, webrtc.MimeTypeH264) != webrtc.MimeTypeVP8 {
+		t.Fatal("H264 preferred, only VP8 offered")
+	}
 	h264 := strings.Replace(web, "a=rtpmap:96 VP8/90000\r\n", "", 1)
 	if PickVideoCodec(h264) != webrtc.MimeTypeH264 {
 		t.Fatal("H264-only offer")

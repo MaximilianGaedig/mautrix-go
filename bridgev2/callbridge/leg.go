@@ -84,6 +84,10 @@ type Leg struct {
 	// calls), VideoTrackID its msid track id.
 	LocalVideo   *webrtc.TrackLocalStaticRTP
 	VideoTrackID string
+	// LocalScreen is a shared screen relayed to this leg, a track of its own beside the camera
+	// (nil until AddScreenTrack), ScreenTrackID its msid track id.
+	LocalScreen   *webrtc.TrackLocalStaticRTP
+	ScreenTrackID string
 
 	log     zerolog.Logger
 	cfg     LegConfig
@@ -92,11 +96,13 @@ type Leg struct {
 	remote  chan *webrtc.TrackRemote
 	remoteV chan *webrtc.TrackRemote
 
-	onKeyframeRequest func()
-	lock              sync.Mutex
-	pending           []webrtc.ICECandidateInit
-	haveDesc          bool
-	closed            bool
+	onKeyframeRequest       func()
+	onScreenKeyframeRequest func()
+	ssender                 *webrtc.RTPSender
+	lock                    sync.Mutex
+	pending                 []webrtc.ICECandidateInit
+	haveDesc                bool
+	closed                  bool
 
 	onCandidate func(*webrtc.ICECandidateInit)
 	onState     func(webrtc.PeerConnectionState)
@@ -380,6 +386,43 @@ func (l *Leg) AddVideoTrack(mime string) error {
 	return nil
 }
 
+// AddScreenTrack adds a track for a shared screen mid-call, beside the camera's; renegotiate
+// afterwards. The codec must be registered (AllowVideo).
+func (l *Leg) AddScreenTrack(mime string) error {
+	l.lock.Lock()
+	if l.LocalScreen != nil {
+		l.lock.Unlock()
+		return nil
+	}
+	l.lock.Unlock()
+	id := uuid.NewString()
+	track, err := webrtc.NewTrackLocalStaticRTP(videoCapability(mime), id, l.StreamID)
+	if err != nil {
+		return err
+	}
+	sender, err := l.PC.AddTrack(track)
+	if err != nil {
+		return err
+	}
+	l.lock.Lock()
+	l.LocalScreen, l.ScreenTrackID, l.ssender = track, id, sender
+	l.lock.Unlock()
+	go l.readKeyframeRequests(sender, func() func() {
+		l.lock.Lock()
+		defer l.lock.Unlock()
+		return l.onScreenKeyframeRequest
+	})
+	return nil
+}
+
+// OnScreenKeyframeRequest sets the callback for keyframe requests from this leg's peer about the
+// shared screen we send it.
+func (l *Leg) OnScreenKeyframeRequest(fn func()) {
+	l.lock.Lock()
+	l.onScreenKeyframeRequest = fn
+	l.lock.Unlock()
+}
+
 // Renegotiate makes a new local offer on an established connection (e.g.
 // after AddVideoTrack), with the connection's ICE candidates in it. The offer
 // is applied when its answer arrives (SetAnswer); dropping it (RollbackOffer,
@@ -455,6 +498,16 @@ func (l *Leg) readAudioRTCP(sender *webrtc.RTPSender) {
 }
 
 func (l *Leg) readVideoRTCP(sender *webrtc.RTPSender) {
+	l.readKeyframeRequests(sender, func() func() {
+		l.lock.Lock()
+		defer l.lock.Unlock()
+		return l.onKeyframeRequest
+	})
+}
+
+// readKeyframeRequests passes the peer's requests for a keyframe of what sender sends to the
+// callback current at the time.
+func (l *Leg) readKeyframeRequests(sender *webrtc.RTPSender, callback func() func()) {
 	for {
 		pkts, _, err := sender.ReadRTCP()
 		if err != nil {
@@ -463,10 +516,7 @@ func (l *Leg) readVideoRTCP(sender *webrtc.RTPSender) {
 		for _, p := range pkts {
 			switch p.(type) {
 			case *rtcp.PictureLossIndication, *rtcp.FullIntraRequest:
-				l.lock.Lock()
-				cb := l.onKeyframeRequest
-				l.lock.Unlock()
-				if cb != nil {
+				if cb := callback(); cb != nil {
 					cb()
 				}
 			}
