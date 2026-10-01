@@ -21,6 +21,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/go-logr/logr"
 	"github.com/livekit/protocol/livekit"
@@ -56,8 +58,8 @@ type RTCLeg struct {
 	audio *webrtc.TrackLocalStaticRTP
 
 	mu          sync.Mutex
-	video       *lksdk.LocalTrack
-	screen      *lksdk.LocalTrack
+	video       *videoOut
+	screen      *videoOut
 	remoteAudio chan *webrtc.TrackRemote
 	remoteVideo chan *webrtc.TrackRemote
 	// remoteScreen is a Matrix participant's shared screen: a track of its own beside the camera,
@@ -155,20 +157,20 @@ func (l *RTCLeg) AudioWriter() RTPWriter { return l.audio }
 
 // AddVideoTrack publishes a camera track (once) and returns where the other network's video goes.
 func (l *RTCLeg) AddVideoTrack(mime string) (RTPWriter, error) {
-	return l.addVideo(mime, &l.video, livekit.TrackSource_CAMERA, "camera", l.requestKeyframe)
+	return l.addVideo(mime, &l.video, livekit.TrackSource_CAMERA, "camera", videoIdle, l.requestKeyframe)
 }
 
 // AddScreenTrack publishes a screen share track (once) and returns where the other network's shared
 // screen goes: a source of its own, so Element Call shows it as a screen share beside the camera.
 func (l *RTCLeg) AddScreenTrack(mime string) (RTPWriter, error) {
-	return l.addVideo(mime, &l.screen, livekit.TrackSource_SCREEN_SHARE, "screen", l.requestScreenKeyframe)
+	return l.addVideo(mime, &l.screen, livekit.TrackSource_SCREEN_SHARE, "screen", screenIdle, l.requestScreenKeyframe)
 }
 
-func (l *RTCLeg) addVideo(mime string, slot **lksdk.LocalTrack, source livekit.TrackSource, name string, onKeyframe func()) (RTPWriter, error) {
+func (l *RTCLeg) addVideo(mime string, slot **videoOut, source livekit.TrackSource, name string, idle time.Duration, onKeyframe func()) (RTPWriter, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if *slot != nil {
-		return localTrackWriter{*slot}, nil
+		return *slot, nil
 	}
 	// A LiveKit LocalTrack rather than a static one: it hands us the subscribers' keyframe requests
 	// (PLI/FIR), which the SDK otherwise swallows.
@@ -181,20 +183,95 @@ func (l *RTCLeg) addVideo(mime string, slot **lksdk.LocalTrack, source livekit.T
 	if err != nil {
 		return nil, err
 	}
-	if _, err = l.room.LocalParticipant.PublishTrack(track, &lksdk.TrackPublicationOptions{
+	pub, err := l.room.LocalParticipant.PublishTrack(track, &lksdk.TrackPublicationOptions{
 		Name:   name,
 		Source: source,
-	}); err != nil {
+	})
+	if err != nil {
 		return nil, fmt.Errorf("publish %s: %w", name, err)
 	}
-	*slot = track
-	return localTrackWriter{track}, nil
+	out := &videoOut{t: track}
+	out.gate.setMuted = func(muted bool) {
+		l.log.Debug().Str("track", name).Bool("muted", muted).Msg("The other network's video stopped or came back")
+		pub.SetMuted(muted)
+	}
+	// Whoever is watching needs a keyframe to pick the picture up again.
+	out.gate.onResume = onKeyframe
+	*slot = out
+	go l.watchFlow(&out.gate, idle)
+	return out, nil
 }
 
-// localTrackWriter adapts a LiveKit LocalTrack to RTPWriter.
-type localTrackWriter struct{ t *lksdk.LocalTrack }
+// videoIdle is how long the other network may send nothing of a camera before the Matrix call is
+// told it is off. screenIdle is the same for a shared screen, which is given longer: a screen that
+// isn't changing is sent at a frame or so a second, and at times less.
+const (
+	videoIdle  = 2 * time.Second
+	screenIdle = 8 * time.Second
+)
 
-func (w localTrackWriter) WriteRTP(p *rtp.Packet) error { return w.t.WriteRTP(p, nil) }
+// watchFlow mutes a published video while nothing is being written to it.
+func (l *RTCLeg) watchFlow(gate *flowGate, idle time.Duration) {
+	tick := time.NewTicker(videoIdle / 4)
+	defer tick.Stop()
+	for now := range tick.C {
+		l.mu.Lock()
+		closed := l.closed
+		l.mu.Unlock()
+		if closed {
+			return
+		}
+		gate.check(now, idle)
+	}
+}
+
+// flowGate tells a call that a video is off while nothing arrives for it, and on again when it does.
+//
+// The other network says a camera was turned off, or a screen share ended, in its own signalling -
+// or not at all: a phone that goes to the background just stops sending. Either way the packets
+// stop, and a track that stays published and unmuted with nothing in it is drawn as its last frame,
+// frozen, for as long as the call lasts. Muting it on silence makes the Matrix side show what is
+// true (the camera is off, the share is over), whatever the reason and whichever bridge it is.
+type flowGate struct {
+	last     atomic.Int64 // when the last packet was written, in unix nanoseconds; 0 before the first
+	muted    atomic.Bool
+	setMuted func(bool)
+	onResume func()
+}
+
+// wrote notes a packet, and unmutes the video if it had gone quiet.
+func (g *flowGate) wrote(now time.Time) {
+	g.last.Store(now.UnixNano())
+	if g.muted.CompareAndSwap(true, false) {
+		g.setMuted(false)
+		if g.onResume != nil {
+			g.onResume()
+		}
+	}
+}
+
+// check mutes the video if nothing has been written for idle. Before the first packet there is
+// nothing to freeze on, so nothing to mute.
+func (g *flowGate) check(now time.Time, idle time.Duration) {
+	last := g.last.Load()
+	if last == 0 || now.Sub(time.Unix(0, last)) < idle {
+		return
+	}
+	if g.muted.CompareAndSwap(false, true) {
+		g.setMuted(true)
+	}
+}
+
+// videoOut is a published video: an RTPWriter over a LiveKit LocalTrack that keeps its flowGate.
+type videoOut struct {
+	t    *lksdk.LocalTrack
+	gate flowGate
+}
+
+func (w *videoOut) WriteRTP(p *rtp.Packet) error {
+	w.gate.wrote(time.Now())
+	return w.t.WriteRTP(p, nil)
+}
 
 // RemoteAudio waits for the first Matrix participant's microphone.
 func (l *RTCLeg) RemoteAudio(ctx context.Context) (*webrtc.TrackRemote, error) {

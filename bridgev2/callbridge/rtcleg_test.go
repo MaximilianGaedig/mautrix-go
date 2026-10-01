@@ -174,3 +174,39 @@ func TestRouteOf(t *testing.T) {
 		}
 	}
 }
+
+// When the other side turns its camera off, or a phone goes to the background, the packets stop -
+// and a track left published and unmuted with nothing in it was drawn as its last frame, frozen,
+// for the rest of the call.
+func TestFlowGateMutesASilentVideo(t *testing.T) {
+	var states []bool
+	resumed := 0
+	gate := flowGate{setMuted: func(muted bool) { states = append(states, muted) }, onResume: func() { resumed++ }}
+	start := time.Unix(1_700_000_000, 0)
+
+	// Nothing has arrived yet: there is no last frame to freeze on.
+	gate.check(start.Add(time.Minute), 2*time.Second)
+	if len(states) != 0 {
+		t.Fatalf("muted before the first packet: %v", states)
+	}
+
+	gate.wrote(start)
+	gate.check(start.Add(time.Second), 2*time.Second)
+	if len(states) != 0 {
+		t.Fatalf("muted while the video was flowing: %v", states)
+	}
+
+	// Silence: off, once, however often it is checked.
+	gate.check(start.Add(3*time.Second), 2*time.Second)
+	gate.check(start.Add(4*time.Second), 2*time.Second)
+	if len(states) != 1 || !states[0] {
+		t.Fatalf("after silence: %v, want muted once", states)
+	}
+
+	// It comes back: on again, and a keyframe is asked for so the picture can be picked up.
+	gate.wrote(start.Add(10 * time.Second))
+	gate.wrote(start.Add(10*time.Second + 30*time.Millisecond))
+	if len(states) != 2 || states[1] || resumed != 1 {
+		t.Fatalf("after it came back: %v, resumed %d times; want unmuted once and one keyframe request", states, resumed)
+	}
+}
