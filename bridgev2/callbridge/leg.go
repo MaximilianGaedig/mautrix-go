@@ -95,8 +95,10 @@ type Leg struct {
 	cfg     LegConfig
 	sender  *webrtc.RTPSender
 	vsender *webrtc.RTPSender
-	remote  chan *webrtc.TrackRemote
-	remoteV chan *webrtc.TrackRemote
+	// remote and remoteV keep the peer's audio and video tracks until RemoteTrack and
+	// RemoteVideoTrack take them, every one of them, in the order they arrived.
+	remote  *trackQueue
+	remoteV *trackQueue
 
 	onKeyframeRequest       func()
 	onScreenKeyframeRequest func()
@@ -210,8 +212,8 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 		log:        cfg.Log.With().Str("leg", cfg.Name).Logger(),
 		cfg:        cfg,
 		channels:   map[string]*webrtc.DataChannel{},
-		remote:     make(chan *webrtc.TrackRemote, 1),
-		remoteV:    make(chan *webrtc.TrackRemote, 1),
+		remote:     newTrackQueue(),
+		remoteV:    newTrackQueue(),
 		gathered:   make(chan struct{}),
 		iceStarted: make(chan struct{}),
 	}
@@ -281,14 +283,19 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 			go each(tr)
 			return
 		}
-		ch := l.remote
+		queue := l.remote
 		if tr.Kind() == webrtc.RTPCodecTypeVideo {
-			ch = l.remoteV
+			queue = l.remoteV
 		}
-		select {
-		case ch <- tr:
-		default:
-		}
+		// Every track is kept, not only the first of its kind: a screen shared beside the camera
+		// is a second video track, and it used to be dropped here unless the camera's had already
+		// been taken.
+		waiting := queue.put(tr)
+		l.log.Debug().
+			Stringer("kind", tr.Kind()).
+			Str("track_id", tr.ID()).
+			Int("waiting", waiting).
+			Msg("Remote track waits to be taken")
 	})
 	return l, nil
 }
@@ -588,14 +595,15 @@ func sameCodecPayloadTypes(pts []uint8, mime string, codecs []webrtc.RTPCodecPar
 	return pts
 }
 
-// RemoteVideoTrack waits for the peer's video track.
+// RemoteVideoTrack waits for the peer's next video track: the first call gets the first one that
+// arrived, a later call the one after it (a camera that restarted, or a screen shared beside it).
+// It returns an error when ctx ends or the leg is closed.
 func (l *Leg) RemoteVideoTrack(ctx context.Context) (*webrtc.TrackRemote, error) {
-	select {
-	case tr := <-l.remoteV:
-		return tr, nil
-	case <-ctx.Done():
-		return nil, fmt.Errorf("callbridge: no remote video track: %w", ctx.Err())
+	tr, err := l.remoteV.take(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("callbridge: no remote video track: %w", err)
 	}
+	return tr, nil
 }
 
 var videoFeedback = []webrtc.RTCPFeedback{
@@ -777,14 +785,14 @@ func (l *Leg) WaitGathering(ctx context.Context, timeout time.Duration) string {
 // ErrNoRemoteTrack is returned when the peer never started sending audio.
 var ErrNoRemoteTrack = errors.New("callbridge: no remote audio track")
 
-// RemoteTrack waits for the remote audio track.
+// RemoteTrack waits for the peer's next audio track, in the order they arrived (see
+// RemoteVideoTrack).
 func (l *Leg) RemoteTrack(ctx context.Context) (*webrtc.TrackRemote, error) {
-	select {
-	case tr := <-l.remote:
-		return tr, nil
-	case <-ctx.Done():
-		return nil, fmt.Errorf("%w: %w", ErrNoRemoteTrack, ctx.Err())
+	tr, err := l.remote.take(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrNoRemoteTrack, err)
 	}
+	return tr, nil
 }
 
 // Close closes the PeerConnection. It is safe to call more than once.
@@ -801,6 +809,8 @@ func (l *Leg) Close() {
 	l.onCandidate = nil
 	l.onState = nil
 	l.lock.Unlock()
+	l.remote.close()
+	l.remoteV.close()
 	if err := l.PC.Close(); err != nil {
 		l.log.Debug().Err(err).Msg("Error closing PeerConnection")
 	}
