@@ -38,6 +38,8 @@ type Ghost struct {
 
 	syncLock sync.Mutex
 	lastSync time.Time
+
+	roomProfiles roomProfileMemory
 }
 
 func (br *Bridge) loadGhost(ctx context.Context, dbGhost *database.Ghost, queryErr error, id *networkid.UserID) (*Ghost, error) {
@@ -171,6 +173,7 @@ func (ghost *Ghost) UpdateName(ctx context.Context, name string) bool {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to set display name")
 	} else {
 		ghost.NameSet = true
+		ghost.reapplyRoomProfiles(ctx)
 	}
 	return true
 }
@@ -208,6 +211,7 @@ func (ghost *Ghost) UpdateAvatar(ctx context.Context, avatar *Avatar) bool {
 			zerolog.Ctx(ctx).Err(err).Msg("Failed to set avatar URL")
 		} else {
 			ghost.AvatarSet = true
+			ghost.reapplyRoomProfiles(ctx)
 		}
 	}
 	return true
@@ -422,6 +426,9 @@ func (ghost *Ghost) pushProfileChanges(ctx context.Context, nameChanged, avatarC
 		}
 	}
 	ghost.lastSync = time.Now()
+	if nameChanged || avatarChanged {
+		ghost.reapplyRoomProfiles(ctx)
+	}
 }
 
 func (ghost *Ghost) reconcileProfile(ctx context.Context, current *event.MemberEventContent, updatedProfile *UserInfo) {
