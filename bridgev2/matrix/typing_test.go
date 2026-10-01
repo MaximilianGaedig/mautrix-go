@@ -19,22 +19,35 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/appservice"
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/id"
 )
 
+// typingRequest is the body of a typing request as a homeserver sees it.
+type typingRequest struct {
+	Typing  bool   `json:"typing"`
+	Timeout int64  `json:"timeout"`
+	Kind    string `json:"im.mxg.typing.kind"`
+	// HasKind tells a kind that was left out from one sent as an empty string.
+	HasKind bool `json:"-"`
+}
+
 // typingRequests is a homeserver that only records the typing requests it gets.
 type typingRequests struct {
 	lock sync.Mutex
-	got  []mautrix.ReqTyping
+	got  []typingRequest
 }
 
 func (tr *typingRequests) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPut && strings.Contains(r.URL.Path, "/typing/") {
-		var req mautrix.ReqTyping
-		_ = json.NewDecoder(r.Body).Decode(&req)
+		var raw map[string]json.RawMessage
+		_ = json.NewDecoder(r.Body).Decode(&raw)
+		var req typingRequest
+		_ = json.Unmarshal(raw["typing"], &req.Typing)
+		_ = json.Unmarshal(raw["timeout"], &req.Timeout)
+		_ = json.Unmarshal(raw["im.mxg.typing.kind"], &req.Kind)
+		_, req.HasKind = raw["im.mxg.typing.kind"]
 		tr.lock.Lock()
 		tr.got = append(tr.got, req)
 		tr.lock.Unlock()
@@ -43,7 +56,7 @@ func (tr *typingRequests) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write([]byte("{}"))
 }
 
-func (tr *typingRequests) take() []mautrix.ReqTyping {
+func (tr *typingRequests) take() []typingRequest {
 	tr.lock.Lock()
 	defer tr.lock.Unlock()
 	got := tr.got
@@ -51,19 +64,26 @@ func (tr *typingRequests) take() []mautrix.ReqTyping {
 	return got
 }
 
-// A contact recording a voice message or uploading a file is busy writing to us just as one typing
-// text is. Matrix's typing notification has no kind to say which, so all of them show as typing:
-// the other kinds used to be dropped and showed as nothing at all.
-func TestMarkTypingOfEveryKind(t *testing.T) {
+func typingGhost(t *testing.T) (*typingRequests, *appservice.AppService) {
+	t.Helper()
 	hs := &typingRequests{}
 	server := httptest.NewServer(hs)
-	defer server.Close()
+	t.Cleanup(server.Close)
 	as, err := appservice.CreateFull(appservice.CreateOpts{
 		Registration:     &appservice.Registration{AppToken: "token", SenderLocalpart: "bot"},
 		HomeserverDomain: "example.com",
 		HomeserverURL:    server.URL,
 	})
 	require.NoError(t, err)
+	return hs, as
+}
+
+// A contact recording a voice message or uploading a file is busy writing to us just as one typing
+// text is. All of them are sent as typing, so a homeserver that knows nothing else shows them as
+// typing, and the kind rides beside it for one that can say which. Plain typing has no kind at all:
+// it is the request it always was.
+func TestMarkTypingOfEveryKind(t *testing.T) {
+	hs, as := typingGhost(t)
 	ghost := &ASIntent{Matrix: as.Intent(id.NewUserID("ghost", "example.com"))}
 	ctx := context.Background()
 	const roomID = id.RoomID("!room:example.com")
@@ -71,16 +91,17 @@ func TestMarkTypingOfEveryKind(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		kind bridgev2.TypingType
+		want typingRequest
 	}{
-		{"text", bridgev2.TypingTypeText},
-		{"recording media", bridgev2.TypingTypeRecordingMedia},
-		{"uploading media", bridgev2.TypingTypeUploadingMedia},
+		{"text", bridgev2.TypingTypeText, typingRequest{Typing: true, Timeout: 5000}},
+		{"recording media", bridgev2.TypingTypeRecordingMedia, typingRequest{Typing: true, Timeout: 5000, Kind: "recording_voice", HasKind: true}},
+		{"uploading media", bridgev2.TypingTypeUploadingMedia, typingRequest{Typing: true, Timeout: 5000, Kind: "uploading_file", HasKind: true}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			require.NoError(t, ghost.MarkTyping(ctx, roomID, tc.kind, 5*time.Second))
-			assert.Equal(t, []mautrix.ReqTyping{{Typing: true, Timeout: 5000}}, hs.take(), "started")
+			assert.Equal(t, []typingRequest{tc.want}, hs.take(), "started")
 			require.NoError(t, ghost.MarkTyping(ctx, roomID, tc.kind, 0))
-			assert.Equal(t, []mautrix.ReqTyping{{Typing: false}}, hs.take(), "stopped")
+			assert.Equal(t, []typingRequest{{Typing: false}}, hs.take(), "stopped: there is no kind without typing")
 		})
 	}
 

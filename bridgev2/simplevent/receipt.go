@@ -11,6 +11,7 @@ import (
 
 	"maunium.net/go/mautrix/bridgev2"
 	"maunium.net/go/mautrix/bridgev2/networkid"
+	"maunium.net/go/mautrix/event"
 )
 
 type Receipt struct {
@@ -61,12 +62,19 @@ type Typing struct {
 	EventMeta
 	Timeout time.Duration
 	Type    bridgev2.TypingType
+	// Kind is optional, for networks that tell more than Type can. When it's empty, Type decides.
+	Kind event.TypingKind
 }
 
 var (
 	_ bridgev2.RemoteTyping         = (*Typing)(nil)
 	_ bridgev2.RemoteTypingWithType = (*Typing)(nil)
+	_ bridgev2.RemoteTypingWithKind = (*Typing)(nil)
 )
+
+func (evt *Typing) GetTypingKind() event.TypingKind {
+	return evt.Kind
+}
 
 func (evt *Typing) GetTimeout() time.Duration {
 	return evt.Timeout

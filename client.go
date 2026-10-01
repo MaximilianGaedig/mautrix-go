@@ -1795,7 +1795,17 @@ func (cli *Client) UnbanUser(ctx context.Context, roomID id.RoomID, req *ReqUnba
 
 // UserTyping sets the typing status of the user. See https://spec.matrix.org/v1.2/client-server-api/#put_matrixclientv3roomsroomidtypinguserid
 func (cli *Client) UserTyping(ctx context.Context, roomID id.RoomID, typing bool, timeout time.Duration) (resp *RespTyping, err error) {
+	return cli.UserTypingKind(ctx, roomID, typing, timeout, event.TypingKindText)
+}
+
+// UserTypingKind sets the typing status of the user like [Client.UserTyping], and says what the user
+// is doing (the im.mxg.typing_kinds extension). A homeserver that doesn't know the extension ignores
+// the kind and shows the user as typing, so there's no need to check for support first.
+func (cli *Client) UserTypingKind(ctx context.Context, roomID id.RoomID, typing bool, timeout time.Duration, kind event.TypingKind) (resp *RespTyping, err error) {
 	req := ReqTyping{Typing: typing, Timeout: timeout.Milliseconds()}
+	if kind = kind.Known(); typing && kind != event.TypingKindText {
+		req.Kind = kind
+	}
 	u := cli.BuildClientURL("v3", "rooms", roomID, "typing", cli.UserID)
 	_, err = cli.MakeRequest(ctx, http.MethodPut, u, req, &resp)
 	return
