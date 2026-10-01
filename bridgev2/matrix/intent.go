@@ -490,8 +490,14 @@ func (as *ASIntent) doUploadReq(ctx context.Context, file *event.EncryptedFileIn
 	return
 }
 
+// A ghost's global profile is pushed without touching the rooms where it has a name or avatar of
+// its own (a nickname in one chat), on homeservers that can be asked for that.
+func keepRoomProfiles(ctx context.Context) context.Context {
+	return mautrix.WithProfilePropagation(ctx, mautrix.ProfilePropagationUnchanged)
+}
+
 func (as *ASIntent) SetDisplayName(ctx context.Context, name string) error {
-	return as.Matrix.SetDisplayName(ctx, name)
+	return as.Matrix.SetDisplayName(keepRoomProfiles(ctx), name)
 }
 
 func (as *ASIntent) SetAvatarURL(ctx context.Context, avatarURL id.ContentURIString) error {
@@ -499,7 +505,7 @@ func (as *ASIntent) SetAvatarURL(ctx context.Context, avatarURL id.ContentURIStr
 	if err != nil {
 		return err
 	}
-	return as.Matrix.SetAvatarURL(ctx, parsedAvatarURL)
+	return as.Matrix.SetAvatarURL(keepRoomProfiles(ctx), parsedAvatarURL)
 }
 
 func dataToFields(data any) (map[string]json.RawMessage, error) {

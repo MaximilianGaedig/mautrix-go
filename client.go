@@ -1366,7 +1366,7 @@ func (cli *Client) SetProfileField(ctx context.Context, key string, value any) (
 	if key != "displayname" && key != "avatar_url" && !cli.SpecVersions.Supports(FeatureArbitraryProfileFields) && cli.SpecVersions.Supports(FeatureUnstableProfileFields) {
 		urlPath = cli.BuildClientURL("unstable", "uk.tcpip.msc4133", "profile", cli.UserID, key)
 	}
-	_, err = cli.MakeRequest(ctx, http.MethodPut, urlPath, map[string]any{
+	_, err = cli.MakeRequest(ctx, http.MethodPut, addProfilePropagation(ctx, urlPath), map[string]any{
 		key: value,
 	}, nil)
 	return
@@ -1416,7 +1416,7 @@ func (cli *Client) SetAvatarURL(ctx context.Context, url id.ContentURI) (err err
 	s := struct {
 		AvatarURL string `json:"avatar_url"`
 	}{url.String()}
-	_, err = cli.MakeRequest(ctx, http.MethodPut, urlPath, &s, nil)
+	_, err = cli.MakeRequest(ctx, http.MethodPut, addProfilePropagation(ctx, urlPath), &s, nil)
 	if err != nil {
 		return err
 	}
