@@ -237,6 +237,13 @@ type MatrixAPI interface {
 	GetEvent(ctx context.Context, roomID id.RoomID, eventID id.EventID) (*event.Event, error)
 }
 
+// TypingKindMatrixAPI is a Matrix API that can say what a typing ghost is doing more exactly than
+// the typing types of MarkTyping allow.
+type TypingKindMatrixAPI interface {
+	MatrixAPI
+	MarkTypingKind(ctx context.Context, roomID id.RoomID, kind event.TypingKind, timeout time.Duration) error
+}
+
 type StreamOrderReadingMatrixAPI interface {
 	MatrixAPI
 	MarkStreamOrderRead(ctx context.Context, roomID id.RoomID, streamOrder int64, ts time.Time) error

@@ -93,8 +93,8 @@ func (portal *PortalInternals) HandleMatrixTyping(ctx context.Context, evt *even
 	return (*Portal)(portal).handleMatrixTyping(ctx, evt)
 }
 
-func (portal *PortalInternals) SendTypings(ctx context.Context, userIDs []id.UserID, typing bool) {
-	(*Portal)(portal).sendTypings(ctx, userIDs, typing)
+func (portal *PortalInternals) SendTypings(ctx context.Context, userIDs []id.UserID, typing bool, kinds map[id.UserID]event.TypingKind) {
+	(*Portal)(portal).sendTypings(ctx, userIDs, typing, kinds)
 }
 
 func (portal *PortalInternals) PeriodicTypingUpdater() {

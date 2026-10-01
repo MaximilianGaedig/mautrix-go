@@ -1465,9 +1465,42 @@ const (
 	TypingTypeRecordingMedia
 )
 
+// Kind is what a typing type is shown as on Matrix when the network connector says nothing finer.
+func (tt TypingType) Kind() event.TypingKind {
+	switch tt {
+	case TypingTypeRecordingMedia:
+		return event.TypingKindRecordingVoice
+	case TypingTypeUploadingMedia:
+		return event.TypingKindUploadingFile
+	default:
+		return event.TypingKindText
+	}
+}
+
+// TypingTypeOfKind is the typing type a Matrix typing kind is passed to a network connector as.
+// Kinds without a type of their own (choosing a sticker, and any unknown one) are typing text:
+// connectors switch over the three types, so there is no fourth to hand them.
+func TypingTypeOfKind(kind event.TypingKind) TypingType {
+	switch kind {
+	case event.TypingKindRecordingVoice, event.TypingKindRecordingVideo:
+		return TypingTypeRecordingMedia
+	case event.TypingKindUploadingPhoto, event.TypingKindUploadingVideo, event.TypingKindUploadingFile, event.TypingKindUploadingVoice:
+		return TypingTypeUploadingMedia
+	default:
+		return TypingTypeText
+	}
+}
+
 type RemoteTypingWithType interface {
 	RemoteTyping
 	GetTypingType() TypingType
+}
+
+// RemoteTypingWithKind is a typing event from a network that tells more than the three typing types
+// can, such as a photo upload from a video upload. An empty kind falls back to the typing type.
+type RemoteTypingWithKind interface {
+	RemoteTyping
+	GetTypingKind() event.TypingKind
 }
 
 type OrigSender struct {
@@ -1594,6 +1627,9 @@ type MatrixTyping struct {
 	Portal   *Portal
 	IsTyping bool
 	Type     TypingType
+	// Kind is exactly what the Matrix user is doing, for networks that tell more than Type can.
+	// It is always one of the known kinds, and [event.TypingKindText] when the user stopped typing.
+	Kind event.TypingKind
 }
 
 type MatrixViewingChat struct {

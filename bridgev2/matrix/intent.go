@@ -211,13 +211,18 @@ func (as *ASIntent) markedUnreadContent(unread bool) map[string]any {
 }
 
 func (as *ASIntent) MarkTyping(ctx context.Context, roomID id.RoomID, typingType bridgev2.TypingType, timeout time.Duration) error {
-	// m.typing has no kind, so recording or uploading media shows as plain typing rather than as
-	// nothing: the contact is about to send something either way.
+	return as.MarkTypingKind(ctx, roomID, typingType.Kind(), timeout)
+}
+
+// MarkTypingKind sends the kind beside the typing notification without asking whether the homeserver
+// knows the extension: one that doesn't ignores it, and recording or uploading media then shows as
+// plain typing rather than as nothing. The contact is about to send something either way.
+func (as *ASIntent) MarkTypingKind(ctx context.Context, roomID id.RoomID, kind event.TypingKind, timeout time.Duration) error {
 	if as.Matrix.IsCustomPuppet {
 		// Don't send double puppeted typing notifications, there's no good way to prevent echoing them
 		return nil
 	}
-	_, err := as.Matrix.UserTyping(ctx, roomID, timeout > 0, timeout)
+	_, err := as.Matrix.UserTypingKind(ctx, roomID, timeout > 0, timeout, kind)
 	return err
 }
 

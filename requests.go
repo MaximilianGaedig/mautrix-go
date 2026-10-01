@@ -237,6 +237,9 @@ type ReqUnbanUser struct {
 type ReqTyping struct {
 	Typing  bool  `json:"typing"`
 	Timeout int64 `json:"timeout,omitzero"`
+
+	// Kind is the im.mxg.typing_kinds extension: what the user is doing, when it isn't typing text.
+	Kind event.TypingKind `json:"im.mxg.typing.kind,omitempty"`
 }
 
 type ReqPresence struct {

@@ -13,10 +13,70 @@ import (
 	"maunium.net/go/mautrix/id"
 )
 
+// TypingKind says what a typing user is doing: other networks tell their users that a contact is
+// recording a voice message or sending a photo, where m.typing alone only says typing.
+//
+// The vocabulary is closed, and anything outside it means plain typing. See [TypingKind.Known].
+type TypingKind string
+
+const (
+	TypingKindText            TypingKind = "text"
+	TypingKindRecordingVoice  TypingKind = "recording_voice"
+	TypingKindRecordingVideo  TypingKind = "recording_video"
+	TypingKindUploadingPhoto  TypingKind = "uploading_photo"
+	TypingKindUploadingVideo  TypingKind = "uploading_video"
+	TypingKindUploadingFile   TypingKind = "uploading_file"
+	TypingKindUploadingVoice  TypingKind = "uploading_voice"
+	TypingKindChoosingSticker TypingKind = "choosing_sticker"
+)
+
+// Known returns the kind itself if it is one of the vocabulary, and [TypingKindText] otherwise:
+// an empty kind, or one a newer client or server came up with, is plain typing rather than an error.
+func (tk TypingKind) Known() TypingKind {
+	switch tk {
+	case TypingKindRecordingVoice, TypingKindRecordingVideo,
+		TypingKindUploadingPhoto, TypingKindUploadingVideo, TypingKindUploadingFile, TypingKindUploadingVoice,
+		TypingKindChoosingSticker:
+		return tk
+	default:
+		return TypingKindText
+	}
+}
+
+// TypingKinds is what each typing user is doing. Users typing plain text are not listed.
+type TypingKinds map[id.UserID]TypingKind
+
+// UnmarshalJSON reads as much of the map as makes sense and never fails: the kinds are an extra
+// beside the list of typing users, and a malformed extra must not cost the typing notification.
+func (tk *TypingKinds) UnmarshalJSON(data []byte) error {
+	var raw map[id.UserID]json.RawMessage
+	if json.Unmarshal(data, &raw) != nil {
+		return nil
+	}
+	kinds := make(TypingKinds, len(raw))
+	for userID, rawKind := range raw {
+		var kind TypingKind
+		if json.Unmarshal(rawKind, &kind) == nil && kind.Known() != TypingKindText {
+			kinds[userID] = kind
+		}
+	}
+	*tk = kinds
+	return nil
+}
+
 // TypingEventContent represents the content of a m.typing ephemeral event.
 // https://spec.matrix.org/v1.2/client-server-api/#mtyping
 type TypingEventContent struct {
 	UserIDs []id.UserID `json:"user_ids"`
+
+	// Kinds is the im.mxg.typing_kinds extension. Use [TypingEventContent.KindOf] to read it.
+	Kinds TypingKinds `json:"im.mxg.typing.kinds,omitempty"`
+}
+
+// KindOf returns what a typing user is doing, which is typing text unless the event says otherwise.
+// It doesn't check that the user is typing at all.
+func (content *TypingEventContent) KindOf(userID id.UserID) TypingKind {
+	return content.Kinds[userID].Known()
 }
 
 // ReceiptEventContent represents the content of a m.receipt ephemeral event.

@@ -83,6 +83,7 @@ type Portal struct {
 	Relay  *UserLogin
 
 	currentlyTyping       []id.UserID
+	currentlyTypingKinds  map[id.UserID]event.TypingKind
 	currentlyTypingLogins map[id.UserID]*UserLogin
 	currentlyTypingLock   sync.Mutex
 	currentlyTypingGhosts *exsync.Set[id.UserID]
@@ -1081,17 +1082,46 @@ func (portal *Portal) handleMatrixTyping(ctx context.Context, evt *event.Event) 
 	portal.currentlyTypingLock.Lock()
 	defer portal.currentlyTypingLock.Unlock()
 	slices.Sort(content.UserIDs)
-	stoppedTyping, startedTyping := exslices.SortedDiff(portal.currentlyTyping, content.UserIDs, func(a, b id.UserID) int {
-		return strings.Compare(string(a), string(b))
-	})
-	portal.sendTypings(ctx, stoppedTyping, false)
-	portal.sendTypings(ctx, startedTyping, true)
+	stoppedTyping, startedTyping, kinds := typingChanges(portal.currentlyTyping, portal.currentlyTypingKinds, content)
+	portal.sendTypings(ctx, stoppedTyping, false, nil)
+	portal.sendTypings(ctx, startedTyping, true, kinds)
 	portal.currentlyTyping = content.UserIDs
-	// TODO actual status
+	portal.currentlyTypingKinds = kinds
 	return EventHandlingResultSuccess
 }
 
-func (portal *Portal) sendTypings(ctx context.Context, userIDs []id.UserID, typing bool) {
+// typingChanges compares a typing event (with its user IDs sorted) to who was typing what before it.
+// It returns who stopped, who has to be sent to the network as typing, and what everyone typing is
+// doing now, without those typing plain text. Somebody who goes from typing to recording a voice
+// message never left the list of typing users, so a changed kind counts as started as well.
+func typingChanges(prev []id.UserID, prevKinds map[id.UserID]event.TypingKind, content *event.TypingEventContent) (stopped, started []id.UserID, kinds map[id.UserID]event.TypingKind) {
+	stopped, started = exslices.SortedDiff(prev, content.UserIDs, func(a, b id.UserID) int {
+		return strings.Compare(string(a), string(b))
+	})
+	for _, userID := range content.UserIDs {
+		kind := content.KindOf(userID)
+		if kind != event.TypingKindText {
+			if kinds == nil {
+				kinds = make(map[id.UserID]event.TypingKind)
+			}
+			kinds[userID] = kind
+		}
+		if _, wasTyping := slices.BinarySearch(prev, userID); wasTyping && kind != typingKindOf(prevKinds, userID) {
+			started = append(started, userID)
+		}
+	}
+	return
+}
+
+// typingKindOf reads a map of typing kinds, where users typing plain text are not listed.
+func typingKindOf(kinds map[id.UserID]event.TypingKind, userID id.UserID) event.TypingKind {
+	if kind, ok := kinds[userID]; ok {
+		return kind
+	}
+	return event.TypingKindText
+}
+
+func (portal *Portal) sendTypings(ctx context.Context, userIDs []id.UserID, typing bool, kinds map[id.UserID]event.TypingKind) {
 	for _, userID := range userIDs {
 		login, ok := portal.currentlyTypingLogins[userID]
 		if !ok && !typing {
@@ -1124,10 +1154,12 @@ func (portal *Portal) sendTypings(ctx context.Context, userIDs []id.UserID, typi
 		if !ok {
 			continue
 		}
+		kind := typingKindOf(kinds, userID)
 		err := typingAPI.HandleMatrixTyping(ctx, &MatrixTyping{
 			Portal:   portal,
 			IsTyping: typing,
-			Type:     TypingTypeText,
+			Type:     TypingTypeOfKind(kind),
+			Kind:     kind,
 		})
 		if err != nil {
 			zerolog.Ctx(ctx).Err(err).Stringer("user_id", userID).Msg("Failed to bridge Matrix typing event")
@@ -1135,6 +1167,7 @@ func (portal *Portal) sendTypings(ctx context.Context, userIDs []id.UserID, typi
 			zerolog.Ctx(ctx).Debug().
 				Stringer("user_id", userID).
 				Bool("typing", typing).
+				Str("kind", string(kind)).
 				Msg("Sent typing event")
 		}
 	}
@@ -1161,10 +1194,12 @@ func (portal *Portal) periodicTypingUpdater() {
 			if !ok {
 				continue
 			}
+			kind := typingKindOf(portal.currentlyTypingKinds, userID)
 			err := typingAPI.HandleMatrixTyping(ctx, &MatrixTyping{
 				Portal:   portal,
 				IsTyping: true,
-				Type:     TypingTypeText,
+				Type:     TypingTypeOfKind(kind),
+				Kind:     kind,
 			})
 			if err != nil {
 				log.Err(err).Stringer("user_id", userID).Msg("Failed to repeat Matrix typing event")
@@ -4016,6 +4051,21 @@ func (portal *Portal) handleRemoteDeliveryReceipt(ctx context.Context, source *U
 	return EventHandlingResultSuccess
 }
 
+// remoteTypingKind is what a typing event from the network says the user is doing: the exact kind
+// if the connector gives a known one, and otherwise the one its typing type stands for.
+func remoteTypingKind(evt RemoteTyping) event.TypingKind {
+	if kindEvt, ok := evt.(RemoteTypingWithKind); ok {
+		kind := kindEvt.GetTypingKind()
+		if kind == event.TypingKindText || kind.Known() != event.TypingKindText {
+			return kind
+		}
+	}
+	if typedEvt, ok := evt.(RemoteTypingWithType); ok {
+		return typedEvt.GetTypingType().Kind()
+	}
+	return event.TypingKindText
+}
+
 func (portal *Portal) handleRemoteTyping(ctx context.Context, source *UserLogin, evt RemoteTyping) EventHandlingResult {
 	var typingType TypingType
 	if typedEvt, ok := evt.(RemoteTypingWithType); ok {
@@ -4026,7 +4076,14 @@ func (portal *Portal) handleRemoteTyping(ctx context.Context, source *UserLogin,
 		return EventHandlingResultFailed.WithError(ErrFailedToGetIntent)
 	}
 	timeout := evt.GetTimeout()
-	err := intent.MarkTyping(ctx, portal.MXID, typingType, timeout)
+	var err error
+	if kind := remoteTypingKind(evt); kind == typingType.Kind() {
+		err = intent.MarkTyping(ctx, portal.MXID, typingType, timeout)
+	} else if kindIntent, ok := intent.(TypingKindMatrixAPI); ok {
+		err = kindIntent.MarkTypingKind(ctx, portal.MXID, kind, timeout)
+	} else {
+		err = intent.MarkTyping(ctx, portal.MXID, TypingTypeOfKind(kind), timeout)
+	}
 	if err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to bridge typing event")
 		return EventHandlingResultFailed.WithError(err)
