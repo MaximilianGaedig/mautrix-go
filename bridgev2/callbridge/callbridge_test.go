@@ -23,6 +23,7 @@ import (
 	"io"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -524,6 +525,92 @@ func TestVideoUpgradeRenegotiation(t *testing.T) {
 	answer, err := element.AnswerOffer(offer)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if err = mxLeg.SetAnswer(answer); err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for i := uint16(0); ctx.Err() == nil; i++ {
+			_ = mxLeg.LocalVideo.WriteRTP(&rtp.Packet{
+				Header:  rtp.Header{Version: 2, SequenceNumber: i, Timestamp: uint32(i) * VideoFrameTicks, Marker: true},
+				Payload: []byte("upgraded"),
+			})
+			time.Sleep(33 * time.Millisecond)
+		}
+	}()
+	tr, err := element.RemoteVideoTrack(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, _, err := tr.ReadRTP(); err != nil || string(p.Payload) != "upgraded" {
+		t.Fatalf("read: %v %v", p, err)
+	}
+}
+
+// iceUfrag returns the ICE username fragment of an SDP.
+func iceUfrag(sdp string) string {
+	_, rest, _ := strings.Cut(sdp, "a=ice-ufrag:")
+	ufrag, _, _ := strings.Cut(rest, "\r\n")
+	return ufrag
+}
+
+// TestRenegotiationBeforeICEStarted: a renegotiation offer that arrives before Pion has started the
+// ICE transport of the first negotiation. Pion starts it on its operations goroutine, which a busy
+// machine gets to late; here it is held up on purpose. The offer must not be taken for an ICE
+// restart: that changed our credentials under a peer that asked for nothing, and the connection
+// never came up (TestVideoUpgradeRenegotiation timing out under load).
+func TestRenegotiationBeforeICEStarted(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	mk := func(name string) *Leg {
+		l, err := NewLeg(LegConfig{Name: name, AllowVideo: true, Settings: loopbackSettings(), Log: zerolog.Nop()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(l.Close)
+		return l
+	}
+	mxLeg, element := mk("matrix"), mk("element")
+
+	// Pion calls the negotiation-needed handler on the goroutine that later starts the transports,
+	// so a handler that doesn't return keeps ICE from starting for as long as the test wants.
+	blocked, held := make(chan struct{}), make(chan struct{})
+	enter, release := sync.OnceFunc(func() { close(blocked) }), sync.OnceFunc(func() { close(held) })
+	element.PC.OnNegotiationNeeded(func() {
+		enter()
+		<-held
+	})
+	t.Cleanup(release)
+	// Adding the track (which answering does anyway) is what makes negotiation needed.
+	if err := element.addLocalTrack(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-blocked:
+	case <-ctx.Done():
+		t.Fatal("the negotiation-needed handler never ran")
+	}
+
+	connect(t, ctx, mxLeg, element)
+	first := element.PC.LocalDescription().SDP
+	if element.PC.ICEConnectionState() != webrtc.ICEConnectionStateNew {
+		t.Fatalf("ICE already %s, the test doesn't hold it back", element.PC.ICEConnectionState())
+	}
+	if err := mxLeg.AddVideoTrack(webrtc.MimeTypeVP8); err != nil {
+		t.Fatal(err)
+	}
+	offer, err := mxLeg.Renegotiate()
+	if err != nil {
+		t.Fatal(err)
+	}
+	// ICE starts while the renegotiation offer is already waiting to be answered.
+	time.AfterFunc(200*time.Millisecond, release)
+	answer, err := element.AnswerOffer(offer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if was, now := iceUfrag(first), iceUfrag(answer); was == "" || now != was {
+		t.Fatalf("ICE credentials changed from %q to %q: the renegotiation restarted ICE", was, now)
 	}
 	if err = mxLeg.SetAnswer(answer); err != nil {
 		t.Fatal(err)

@@ -123,7 +123,14 @@ type Leg struct {
 	// into renegotiation offers (CreateOffer's SDP has none).
 	localCandidates []string
 	gatheringDone   bool
+	// iceStarted is closed once the ICE transport has started (its state left "new"), which is
+	// when Pion knows the peer's ICE credentials; see waitICEStarted.
+	iceStarted chan struct{}
 }
+
+// iceStartTimeout bounds how long a renegotiation waits for the ICE transport to start. Pion starts
+// it right after the first negotiation, so the wait is normally over before it began.
+const iceStartTimeout = 5 * time.Second
 
 // NewLeg creates a PeerConnection with Opus audio (and, for WebShape, the
 // web client's video codecs).
@@ -196,16 +203,17 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 		return nil, err
 	}
 	l := &Leg{
-		Name:     cfg.Name,
-		PC:       pc,
-		TrackID:  uuid.NewString(),
-		StreamID: uuid.NewString(),
-		log:      cfg.Log.With().Str("leg", cfg.Name).Logger(),
-		cfg:      cfg,
-		channels: map[string]*webrtc.DataChannel{},
-		remote:   make(chan *webrtc.TrackRemote, 1),
-		remoteV:  make(chan *webrtc.TrackRemote, 1),
-		gathered: make(chan struct{}),
+		Name:       cfg.Name,
+		PC:         pc,
+		TrackID:    uuid.NewString(),
+		StreamID:   uuid.NewString(),
+		log:        cfg.Log.With().Str("leg", cfg.Name).Logger(),
+		cfg:        cfg,
+		channels:   map[string]*webrtc.DataChannel{},
+		remote:     make(chan *webrtc.TrackRemote, 1),
+		remoteV:    make(chan *webrtc.TrackRemote, 1),
+		gathered:   make(chan struct{}),
+		iceStarted: make(chan struct{}),
 	}
 	l.Local, err = webrtc.NewTrackLocalStaticRTP(webrtc.RTPCodecCapability{
 		MimeType: webrtc.MimeTypeOpus, ClockRate: 48000, Channels: 2,
@@ -253,8 +261,11 @@ func NewLeg(cfg LegConfig) (*Leg, error) {
 			cb(s)
 		}
 	})
+	var iceStartOnce sync.Once
 	pc.OnICEConnectionStateChange(func(s webrtc.ICEConnectionState) {
 		l.log.Debug().Stringer("ice_state", s).Msg("ICE connection state changed")
+		// The first change is the one away from "new" (to "checking", or "closed").
+		iceStartOnce.Do(func() { close(l.iceStarted) })
 	})
 	pc.OnTrack(func(tr *webrtc.TrackRemote, _ *webrtc.RTPReceiver) {
 		l.log.Info().
@@ -697,7 +708,26 @@ func (l *Leg) SetAnswer(answer string) error {
 	return l.setRemote(webrtc.SessionDescription{Type: webrtc.SDPTypeAnswer, SDP: answer})
 }
 
+// waitICEStarted holds a renegotiation back until the ICE transport of the first negotiation has
+// started. Pion starts it on a goroutine of its own after the first remote description is set, and
+// until then has no ICE credentials for the peer: a second remote description arriving in that gap
+// looks like the peer changed its credentials, so an offer makes Pion restart ICE (new credentials
+// of our own, which the peer never asked for), and the delayed start then puts the first
+// description's credentials back over the second's. The two sides end up checking with credentials
+// the other rejects, and the connection never comes up.
+func (l *Leg) waitICEStarted() {
+	if l.PC.CurrentRemoteDescription() == nil {
+		return
+	}
+	select {
+	case <-l.iceStarted:
+	case <-time.After(iceStartTimeout):
+		l.log.Warn().Msg("ICE transport still not started, renegotiating anyway")
+	}
+}
+
 func (l *Leg) setRemote(desc webrtc.SessionDescription) error {
+	l.waitICEStarted()
 	if err := l.PC.SetRemoteDescription(desc); err != nil {
 		return err
 	}
