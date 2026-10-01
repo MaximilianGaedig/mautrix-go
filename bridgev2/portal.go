@@ -101,6 +101,7 @@ type Portal struct {
 	functionalMembersCache *event.ElementFunctionalMembersContent
 
 	events chan portalEvent
+	albums portalAlbums
 
 	eventsLock sync.Mutex
 	eventIdx   int
@@ -561,6 +562,10 @@ func (portal *Portal) getEventCtxWithLog(rawEvt any, idx int) context.Context {
 		return ctx
 	case *portalCreateEvent:
 		return evt.ctx
+	case *portalAlbumFlushEvent:
+		return portal.Log.With().Int("event_loop_index", idx).
+			Str("action", "flush albums").
+			Logger().WithContext(portal.backgroundCtx)
 	default:
 		panic(fmt.Errorf("invalid type %T in getEventCtxWithLog", evt))
 	}
@@ -633,6 +638,9 @@ func (portal *Portal) handleSingleEvent(ctx context.Context, rawEvt any, doneCal
 		err := portal.createMatrixRoomInLoop(evt.ctx, evt.source, evt.info, nil)
 		res.Success = err == nil
 		evt.cb(err)
+	case *portalAlbumFlushEvent:
+		portal.flushDueAlbums(ctx)
+		res = EventHandlingResultSuccess
 	default:
 		panic(fmt.Errorf("illegal type %T in eventLoop", evt))
 	}
@@ -1389,6 +1397,11 @@ func (portal *Portal) handleMatrixMessage(ctx context.Context, sender *UserLogin
 		// TODO stop processing?
 	}
 
+	if msgContent != nil {
+		if res, held := portal.holdAlbumPart(ctx, sender, wrappedMsgEvt, messageTimer); held {
+			return res
+		}
+	}
 	var resp *MatrixMessageResponse
 	if msgContent != nil {
 		resp, err = sender.Client.HandleMatrixMessage(ctx, wrappedMsgEvt)
@@ -1411,6 +1424,16 @@ func (portal *Portal) handleMatrixMessage(ctx context.Context, sender *UserLogin
 		log.Err(err).Msg("Failed to handle Matrix message")
 		return EventHandlingResultFailed.WithMSSError(err)
 	}
+	return portal.finishMatrixMessage(ctx, wrappedMsgEvt, resp, messageTimer)
+}
+
+// finishMatrixMessage does what is left once the network connector has accepted a Matrix message:
+// it saves the message and tells the sender that it was delivered. The parts of an album go
+// through here one by one after they were sent together.
+func (portal *Portal) finishMatrixMessage(ctx context.Context, wrappedMsgEvt *MatrixMessage, resp *MatrixMessageResponse, messageTimer *event.BeeperDisappearingTimer) EventHandlingResult {
+	log := zerolog.Ctx(ctx)
+	evt := wrappedMsgEvt.Event
+	var err error
 	message := wrappedMsgEvt.fillDBMessage(resp.DB)
 	if resp.Pending {
 		for _, save := range wrappedMsgEvt.pendingSaves {
