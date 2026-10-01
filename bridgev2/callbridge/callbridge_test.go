@@ -872,3 +872,81 @@ func TestRewriterAudioLevel(t *testing.T) {
 		t.Errorf("comfort noise level %x, want 7f", got)
 	}
 }
+
+// sendingVideoSections counts the video m-sections of sdp that send.
+func sendingVideoSections(sdp string) int {
+	n := 0
+	for _, sec := range strings.Split(sdp, "\nm=")[1:] {
+		if strings.HasPrefix(sec, "video") && !strings.HasPrefix(sec, "video 0 ") &&
+			(strings.Contains(sec, "a=sendrecv") || strings.Contains(sec, "a=sendonly")) {
+			n++
+		}
+	}
+	return n
+}
+
+// A shared screen is a track beside the camera's, and when the share ends it has to leave the
+// connection: left there and only marked off, the other side kept its last frame up, waiting.
+func TestScreenTrackComesAndGoes(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	mk := func(name string) *Leg {
+		l, err := NewLeg(LegConfig{Name: name, AllowVideo: true, Settings: loopbackSettings(), Log: zerolog.Nop()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(l.Close)
+		return l
+	}
+	ours, theirs := mk("messenger"), mk("peer")
+	connect(t, ctx, ours, theirs)
+	renegotiate := func() string {
+		t.Helper()
+		offer, err := ours.Renegotiate()
+		if err != nil {
+			t.Fatal(err)
+		}
+		answer, err := theirs.AnswerOffer(offer)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = ours.SetAnswer(answer); err != nil {
+			t.Fatal(err)
+		}
+		return offer
+	}
+
+	if err := ours.AddVideoTrack(webrtc.MimeTypeH264); err != nil {
+		t.Fatal(err)
+	}
+	if got := sendingVideoSections(renegotiate()); got != 1 {
+		t.Fatalf("with the camera: %d sending video sections, want 1", got)
+	}
+	if err := ours.AddScreenTrack(webrtc.MimeTypeH264); err != nil {
+		t.Fatal(err)
+	}
+	if ours.LocalScreen == nil || ours.ScreenTrackID == "" || ours.ScreenTrackID == ours.VideoTrackID {
+		t.Fatalf("screen track = %q beside camera %q", ours.ScreenTrackID, ours.VideoTrackID)
+	}
+	if got := sendingVideoSections(renegotiate()); got != 2 {
+		t.Fatalf("sharing a screen: %d sending video sections, want the camera and the screen", got)
+	}
+
+	if err := ours.RemoveScreenTrack(); err != nil {
+		t.Fatal(err)
+	}
+	if ours.LocalScreen != nil {
+		t.Fatal("the screen track is still there after the share ended")
+	}
+	if got := sendingVideoSections(renegotiate()); got != 1 {
+		t.Fatalf("after the share ended: %d sending video sections, want only the camera", got)
+	}
+
+	// And a second share works like the first.
+	if err := ours.AddScreenTrack(webrtc.MimeTypeH264); err != nil {
+		t.Fatal(err)
+	}
+	if got := sendingVideoSections(renegotiate()); got != 2 {
+		t.Fatalf("sharing again: %d sending video sections, want 2", got)
+	}
+}

@@ -415,6 +415,20 @@ func (l *Leg) AddScreenTrack(mime string) error {
 	return nil
 }
 
+// RemoveScreenTrack takes the shared screen's track off the connection once the share has ended;
+// renegotiate afterwards. A track left in place and marked off reads to the other side as a screen
+// still being shared with nothing arriving: it keeps the last frame up, waiting.
+func (l *Leg) RemoveScreenTrack() error {
+	l.lock.Lock()
+	sender := l.ssender
+	l.LocalScreen, l.ScreenTrackID, l.ssender = nil, "", nil
+	l.lock.Unlock()
+	if sender == nil {
+		return nil
+	}
+	return l.PC.RemoveTrack(sender)
+}
+
 // OnScreenKeyframeRequest sets the callback for keyframe requests from this leg's peer about the
 // shared screen we send it.
 func (l *Leg) OnScreenKeyframeRequest(fn func()) {
