@@ -22,6 +22,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -549,6 +551,30 @@ func (l *Leg) OnKeyframeRequest(fn func()) {
 // RequestKeyframe asks this leg's peer for a keyframe of its video.
 func (l *Leg) RequestKeyframe(ssrc webrtc.SSRC) {
 	_ = l.PC.WriteRTCP([]rtcp.Packet{&rtcp.PictureLossIndication{MediaSSRC: uint32(ssrc)}})
+}
+
+// VideoPayloadTypes returns every payload type this leg's peer may send tr's codec under: the one
+// the track began with first, then the others agreed for the same codec on its m-section.
+func (l *Leg) VideoPayloadTypes(tr *webrtc.TrackRemote) []uint8 {
+	pts := []uint8{uint8(tr.PayloadType())}
+	for _, t := range l.PC.GetTransceivers() {
+		r := t.Receiver()
+		if r == nil || r.Track() != tr {
+			continue
+		}
+		pts = sameCodecPayloadTypes(pts, tr.Codec().MimeType, r.GetParameters().Codecs)
+	}
+	return pts
+}
+
+// sameCodecPayloadTypes adds to pts the payload types among codecs that carry mime.
+func sameCodecPayloadTypes(pts []uint8, mime string, codecs []webrtc.RTPCodecParameters) []uint8 {
+	for _, c := range codecs {
+		if pt := uint8(c.PayloadType); strings.EqualFold(c.MimeType, mime) && !slices.Contains(pts, pt) {
+			pts = append(pts, pt)
+		}
+	}
+	return pts
 }
 
 // RemoteVideoTrack waits for the peer's video track.

@@ -20,11 +20,14 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/pion/ice/v4"
+	"github.com/pion/interceptor"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/rs/zerolog"
@@ -948,5 +951,69 @@ func TestScreenTrackComesAndGoes(t *testing.T) {
 	}
 	if got := sendingVideoSections(renegotiate()); got != 2 {
 		t.Fatalf("sharing again: %d sending video sections, want 2", got)
+	}
+}
+
+// packets is an RTPReader over a fixed list, then EOF.
+type packets struct {
+	list []*rtp.Packet
+	next int
+}
+
+func (p *packets) ReadRTP() (*rtp.Packet, interceptor.Attributes, error) {
+	if p.next >= len(p.list) {
+		return nil, nil, io.EOF
+	}
+	p.next++
+	return p.list[p.next-1], nil, nil
+}
+
+// collected is an RTPWriter that keeps what it is given.
+type collected struct{ payloads []string }
+
+func (c *collected) WriteRTP(p *rtp.Packet) error {
+	c.payloads = append(c.payloads, string(p.Payload))
+	return nil
+}
+
+// Messenger's iPhone app agrees H264 under two payload types, sends its camera under one, and when
+// it shares its screen keeps the track and moves to the other. Relaying only the payload type the
+// track began with dropped the whole share: the Matrix side sat on the camera's last frame.
+func TestRelayFollowsTheCodecAcrossPayloadTypes(t *testing.T) {
+	pkt := func(pt uint8, seq uint16, payload string) *rtp.Packet {
+		return &rtp.Packet{Header: rtp.Header{Version: 2, PayloadType: pt, SequenceNumber: seq}, Payload: []byte(payload)}
+	}
+	stream := func() *packets {
+		return &packets{list: []*rtp.Packet{
+			pkt(99, 1, "camera"), pkt(98, 2, "screen"), pkt(103, 3, "fec"), pkt(98, 4, "screen"),
+		}}
+	}
+
+	var only collected
+	var stats RelayStats
+	if err := RelayVideoWith(context.Background(), stream(), 99, &only, &stats, zerolog.Nop(), &Rewriter{FrameTicks: VideoFrameTicks}); err != nil {
+		t.Fatal(err)
+	}
+	if len(only.payloads) != 1 || stats.Dropped.Load() != 3 {
+		t.Fatalf("one payload type: relayed %v, dropped %d", only.payloads, stats.Dropped.Load())
+	}
+
+	var both collected
+	stats = RelayStats{}
+	if err := RelayVideoCodec(context.Background(), stream(), []uint8{99, 98}, &both, &stats, zerolog.Nop(), &Rewriter{FrameTicks: VideoFrameTicks}); err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(both.payloads, ","); got != "camera,screen,screen" || stats.Dropped.Load() != 1 {
+		t.Errorf("the codec's payload types: relayed %q, dropped %d; want the camera and the screen, and the FEC left out", got, stats.Dropped.Load())
+	}
+
+	// What the peer agreed the codec under: both H264s, not the FEC beside them.
+	agreed := []webrtc.RTPCodecParameters{
+		{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264}, PayloadType: 98},
+		{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: webrtc.MimeTypeH264}, PayloadType: 99},
+		{RTPCodecCapability: webrtc.RTPCodecCapability{MimeType: "video/flexfec-03"}, PayloadType: 103},
+	}
+	if pts := sameCodecPayloadTypes([]uint8{99}, webrtc.MimeTypeH264, agreed); !slices.Equal(pts, []uint8{99, 98}) {
+		t.Errorf("payload types for the track's codec: %v, want 99 then 98", pts)
 	}
 }

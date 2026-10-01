@@ -20,7 +20,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"slices"
 	"sync/atomic"
+	"time"
 
 	"github.com/pion/interceptor"
 	"github.com/pion/rtp"
@@ -133,12 +135,12 @@ type RelayStats struct {
 // Packets whose payload type is not srcOpusPT (RED, CN, DTMF) are dropped,
 // since only Opus is negotiated on the other leg.
 func Relay(ctx context.Context, src RTPReader, srcOpusPT uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger) error {
-	return relay(ctx, src, srcOpusPT, dst, stats, log, &Rewriter{}, "audio")
+	return relay(ctx, src, []uint8{srcOpusPT}, dst, stats, log, &Rewriter{}, "audio")
 }
 
 // RelayWith relays Opus like Relay through rw.
 func RelayWith(ctx context.Context, src RTPReader, srcOpusPT uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger, rw *Rewriter) error {
-	return relay(ctx, src, srcOpusPT, dst, stats, log, rw, "audio")
+	return relay(ctx, src, []uint8{srcOpusPT}, dst, stats, log, rw, "audio")
 }
 
 // VideoFrameTicks is one frame at 30 fps on the 90 kHz video clock.
@@ -148,17 +150,32 @@ const VideoFrameTicks = 3000
 // retransmissions under their own payload type are dropped, the receiving
 // leg's NACK responder resends from its own buffer) from src to dst.
 func RelayVideo(ctx context.Context, src RTPReader, srcPT uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger) error {
-	return relay(ctx, src, srcPT, dst, stats, log, &Rewriter{FrameTicks: VideoFrameTicks}, "video")
+	return relay(ctx, src, []uint8{srcPT}, dst, stats, log, &Rewriter{FrameTicks: VideoFrameTicks}, "video")
 }
 
 // RelayVideoWith relays like RelayVideo through rw, which keeps the outgoing stream continuous when
 // the next source track (a camera turned off and on again) is relayed with the same rewriter.
 func RelayVideoWith(ctx context.Context, src RTPReader, srcPT uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger, rw *Rewriter) error {
-	return relay(ctx, src, srcPT, dst, stats, log, rw, "video")
+	return relay(ctx, src, []uint8{srcPT}, dst, stats, log, rw, "video")
 }
 
-func relay(ctx context.Context, src RTPReader, srcOpusPT uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger, rw *Rewriter, kind string) error {
+// RelayVideoCodec relays like RelayVideoWith, taking every payload type in pts: a peer can agree
+// the one codec under several (Messenger's phones offer H264 twice) and move a track from one to
+// another mid-call - when it starts sharing its screen in the camera's track, for one. Relaying only
+// the payload type the track began with dropped everything after such a move, and the picture froze
+// on its last frame.
+func RelayVideoCodec(ctx context.Context, src RTPReader, pts []uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger, rw *Rewriter) error {
+	return relay(ctx, src, pts, dst, stats, log, rw, "video")
+}
+
+// relayGap is how long a stream is silent before its coming back is worth a line in the log.
+const relayGap = 3 * time.Second
+
+func relay(ctx context.Context, src RTPReader, pts []uint8, dst RTPWriter, stats *RelayStats, log zerolog.Logger, rw *Rewriter, kind string) error {
 	loggedFirst := false
+	var lastPT uint8
+	var lastAt time.Time
+	droppedPTs := map[uint8]bool{}
 	for {
 		if ctx.Err() != nil {
 			return ctx.Err()
@@ -170,14 +187,27 @@ func relay(ctx context.Context, src RTPReader, srcOpusPT uint8, dst RTPWriter, s
 			}
 			return err
 		}
-		if p.PayloadType != srcOpusPT {
+		if !slices.Contains(pts, p.PayloadType) {
 			stats.Dropped.Add(1)
+			if !droppedPTs[p.PayloadType] {
+				// Once per payload type: what is being left out, where it used to vanish unseen.
+				droppedPTs[p.PayloadType] = true
+				log.Info().Uint8("payload_type", p.PayloadType).Uints8("relayed_payload_types", pts).
+					Msg("Not relaying " + kind + " packets of this payload type")
+			}
 			continue
 		}
+		now := time.Now()
 		if !loggedFirst {
 			loggedFirst = true
-			log.Info().Ints("source_extensions", extIDs(p)).Msg("First " + kind + " packet relayed")
+			log.Info().Ints("source_extensions", extIDs(p)).Uint8("payload_type", p.PayloadType).
+				Msg("First " + kind + " packet relayed")
+		} else if p.PayloadType != lastPT || now.Sub(lastAt) > relayGap {
+			log.Info().Uint8("payload_type", p.PayloadType).Uint8("was", lastPT).
+				Dur("after_silence", now.Sub(lastAt)).Ints("source_extensions", extIDs(p)).
+				Msg("The " + kind + " stream changed or came back")
 		}
+		lastPT, lastAt = p.PayloadType, now
 		rw.Rewrite(p)
 		if err = dst.WriteRTP(p); err != nil && !errors.Is(err, io.ErrClosedPipe) {
 			return err
