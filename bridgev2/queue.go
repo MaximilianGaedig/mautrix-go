@@ -101,6 +101,9 @@ func (br *Bridge) QueueMatrixEvent(ctx context.Context, evt *event.Event) EventH
 		br.Matrix.SendMessageStatus(ctx, &ErrEventSenderUserNotFound, StatusEventInfoFromEvent(evt))
 		return EventHandlingResultIgnored
 	}
+	if sender != nil && br.handleSettingsSet(ctx, evt, sender) {
+		return EventHandlingResultQueued
+	}
 	if evt.Type == event.EventMessage && sender != nil {
 		msg := evt.Content.AsMessage()
 		msg.RemoveReplyFallback()

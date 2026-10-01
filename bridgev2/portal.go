@@ -6059,7 +6059,7 @@ func (portal *Portal) Save(ctx context.Context) error {
 }
 
 func (portal *Portal) SetRelay(ctx context.Context, relay *UserLogin) error {
-	if portal.Receiver != "" && relay.ID != portal.Receiver {
+	if portal.Receiver != "" && relay != nil && relay.ID != portal.Receiver {
 		return fmt.Errorf("can't set non-receiver login as relay")
 	}
 	portal.Relay = relay
@@ -6072,5 +6072,6 @@ func (portal *Portal) SetRelay(ctx context.Context, relay *UserLogin) error {
 	if err != nil {
 		return err
 	}
+	portal.PublishSettings(ctx)
 	return nil
 }

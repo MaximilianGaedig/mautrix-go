@@ -7,6 +7,10 @@
 package bridgev2
 
 import (
+	"errors"
+	"fmt"
+	"math"
+
 	"maunium.net/go/mautrix/event"
 )
 
@@ -24,8 +28,14 @@ import (
  * and waits for state, with no request/response plumbing of its own.
  */
 
-// BridgeSettingsEventType is the state event in which a bridge lists the controls it offers. Same
-// state-key rule as [BridgeLoginEventType]: one per login, keyed by login ID.
+/*
+ * BridgeSettingsEventType is the state event in which a bridge lists the controls it offers.
+ *
+ * It is published in two places, and the state key says whose controls they are. In the user's
+ * management room it is one event per login, keyed by login ID like [BridgeLoginEventType] beside
+ * it, and describes the account. In a portal room it is keyed by the bridge bot's user ID - the
+ * declaring party - and describes that chat.
+ */
 var BridgeSettingsEventType = event.Type{Type: "im.mxg.settings", Class: event.StateEventType}
 
 // BridgeSettingsSetMsgType is the msgtype of the message a client sends to change one.
@@ -38,7 +48,9 @@ const (
 	// SettingTypeBoolean is on or off; Value is a bool.
 	SettingTypeBoolean BridgeSettingControlType = "boolean"
 	// SettingTypeEnum is one of Options; Value is the chosen option's Value.
-	SettingTypeEnum   BridgeSettingControlType = "enum"
+	SettingTypeEnum BridgeSettingControlType = "enum"
+	// SettingTypeNumber is a whole number between Min and Max. Never a fraction: event content
+	// may not hold floats, and a server answers one with an error rather than rounding it.
 	SettingTypeNumber BridgeSettingControlType = "number"
 	SettingTypeText   BridgeSettingControlType = "text"
 	// SettingTypeAction is a button: it has no value, and setting it means "do this now".
@@ -51,16 +63,32 @@ type BridgeSettingOption struct {
 	Label string `json:"label"`
 }
 
+// BridgeSettingScope says what a set of controls is about.
+type BridgeSettingScope string
+
+const (
+	// SettingScopeLogin is the account as a whole; published in the user's management room.
+	SettingScopeLogin BridgeSettingScope = "login"
+	// SettingScopeRoom is one chat; published in that chat's portal room.
+	SettingScopeRoom BridgeSettingScope = "room"
+)
+
 // BridgeSettingControl is one thing a client may offer to change.
 type BridgeSettingControl struct {
-	Key   string                   `json:"key"`
-	Label string                   `json:"label"`
-	Type  BridgeSettingControlType `json:"type"`
+	Key   string `json:"key"`
+	Label string `json:"label"`
+	// Hint is a sentence saying what the control does, for a client to show under the label. The
+	// same word as an info field's, so one renderer reads both.
+	Hint string                   `json:"hint,omitempty"`
+	Type BridgeSettingControlType `json:"type"`
 	// Value is the current value, or null for an action. Typed per Type, so a client renders it
 	// without knowing what the key means.
 	Value any `json:"value"`
 	// Options is required for an enum and meaningless otherwise.
 	Options []BridgeSettingOption `json:"options,omitempty"`
+	// Min and Max bound a number, both inclusive. Either may be absent, which leaves that side open.
+	Min *int64 `json:"min,omitempty"`
+	Max *int64 `json:"max,omitempty"`
 	/*
 	 * DisabledReason, when set, is shown to the user and the control is inert.
 	 *
@@ -79,7 +107,11 @@ type BridgeSettingsSource struct {
 
 // BridgeSettingsContent is the content of the [BridgeSettingsEventType] state event.
 type BridgeSettingsContent struct {
-	Source   BridgeSettingsSource   `json:"source"`
+	Source BridgeSettingsSource `json:"source"`
+	// Scope says whether these are the account's controls or this chat's. The room it is found in
+	// says the same thing, but a client collecting every declaration it has synced should not have
+	// to know which rooms are management rooms to tell the two apart.
+	Scope    BridgeSettingScope     `json:"scope,omitempty"`
 	Settings []BridgeSettingControl `json:"settings"`
 }
 
@@ -89,8 +121,10 @@ type BridgeSettingsSetContent struct {
 	Key     string `json:"key"`
 	// Value is the wanted value, or null for an action.
 	Value any `json:"value"`
-	// Target is the bridge bot the request is for, so a room bridged by more than one party can be
-	// told apart. Empty means "whoever is listening", which is right in a management room.
+	// Target is the state key of the declaration the control was read from: the bridge bot in a
+	// portal room, so a room bridged by more than one party can be told apart, and the login ID in a
+	// management room, so a user with two accounts on one network can say which. Empty means
+	// "whoever is listening", which is right whenever there is only one.
 	Target string `json:"target,omitempty"`
 }
 
@@ -107,93 +141,143 @@ func (c *BridgeSettingsContent) Control(key string) *BridgeSettingControl {
 // Known control keys. Named here rather than per bridge so that a client can special-case the two
 // that every network has, and so two bridges cannot spell the same control differently.
 const (
-	// SettingKeyBackfill starts importing older history. An action: it has no state to show.
+	// SettingKeyBackfill is whether this chat's older history is imported. A room control.
 	SettingKeyBackfill = "backfill"
-	// SettingKeyRelay carries other Matrix users' messages through this login, for people in the
-	// room who have not logged in themselves.
+	// SettingKeyRelay carries other Matrix users' messages through a login, for people in the
+	// room who have not logged in themselves. A room control: relaying is set per chat.
 	SettingKeyRelay = "relay"
+	// SettingKeyBackfillAll asks for the rest of every chat's history. A login control, and an
+	// action: it has no state of its own to show.
+	SettingKeyBackfillAll = "backfill_all"
 )
 
+// Why a request was refused. The code travels with the notice, so a client can put the refusal
+// next to the control it belongs to instead of reading it out of a sentence.
+const (
+	SettingRefusedUnknown   = "unknown_setting"
+	SettingRefusedDisabled  = "disabled"
+	SettingRefusedInvalid   = "invalid_value"
+	SettingRefusedForbidden = "forbidden"
+	SettingRefusedFailed    = "failed"
+)
+
+// BridgeSettingRefusal is a set request turned down, in words for the user who made it.
+type BridgeSettingRefusal struct {
+	Code    string
+	Message string
+}
+
+func (r *BridgeSettingRefusal) Error() string {
+	return r.Message
+}
+
+// RefuseSetting is what a control's Apply returns to turn a request down in its own words.
+func RefuseSetting(code, format string, args ...any) error {
+	return &BridgeSettingRefusal{Code: code, Message: fmt.Sprintf(format, args...)}
+}
+
+// The largest whole number every JSON implementation carries exactly. A client written in
+// JavaScript holds numbers as doubles, so anything beyond this would arrive as a different number.
+const maxSafeInteger = 1<<53 - 1
+
+// wholeNumber reads a number that may have come through JSON, where every number is a float64, and
+// refuses one that is not whole: "7.5 days" is not a value any control here can hold.
+func wholeNumber(value any) (int64, bool) {
+	switch v := value.(type) {
+	case float64:
+		if v != math.Trunc(v) || math.Abs(v) > maxSafeInteger {
+			return 0, false
+		}
+		return int64(v), true
+	case int:
+		return int64(v), true
+	case int64:
+		return v, true
+	default:
+		return 0, false
+	}
+}
+
+// checkValue reports whether value is one this control can hold, and returns it in the one Go type
+// its control type uses (bool, string, int64, or nil for an action).
+func (control *BridgeSettingControl) checkValue(value any) (any, error) {
+	switch control.Type {
+	case SettingTypeAction:
+		// An action has no value; one being sent means the client is confused about the control.
+		if value != nil {
+			return nil, errors.New("an action takes no value")
+		}
+		return nil, nil
+	case SettingTypeBoolean:
+		// The type is part of the offer. Guessing what a client meant by the wrong one is how a
+		// boolean ends up switched on by the string "false".
+		v, ok := value.(bool)
+		if !ok {
+			return nil, errors.New("the value must be true or false")
+		}
+		return v, nil
+	case SettingTypeEnum:
+		v, ok := value.(string)
+		if !ok {
+			return nil, errors.New("the value must be one of the options")
+		}
+		for _, option := range control.Options {
+			if option.Value == v {
+				return v, nil
+			}
+		}
+		return nil, fmt.Errorf("%q is not one of the options", v)
+	case SettingTypeNumber:
+		v, ok := wholeNumber(value)
+		if !ok {
+			return nil, errors.New("the value must be a whole number")
+		}
+		if control.Min != nil && v < *control.Min {
+			return nil, fmt.Errorf("the value must be at least %d", *control.Min)
+		}
+		if control.Max != nil && v > *control.Max {
+			return nil, fmt.Errorf("the value must be at most %d", *control.Max)
+		}
+		return v, nil
+	case SettingTypeText:
+		v, ok := value.(string)
+		if !ok {
+			return nil, errors.New("the value must be text")
+		}
+		return v, nil
+	default:
+		return nil, fmt.Errorf("unknown control type %q", control.Type)
+	}
+}
+
 /*
- * ValidSet reports whether a set request is one this content could have asked for.
+ * CheckSet reports whether a set request is one this content could have asked for, and returns the
+ * wanted value in the Go type its control uses.
  *
  * Checked against the declared controls rather than against a list of keys, because the declaration
  * is the contract: a control that is absent was never offered, and one that is disabled was offered
  * and then withdrawn - both are refusals, and a bridge that acts on either would be acting on
  * something no client was told it could ask for.
+ *
+ * The control is returned even on a refusal, so a bridge can say which one it turned down and why.
  */
-func (c *BridgeSettingsContent) ValidSet(req *BridgeSettingsSetContent) (*BridgeSettingControl, bool) {
+func (c *BridgeSettingsContent) CheckSet(req *BridgeSettingsSetContent) (*BridgeSettingControl, any, error) {
 	control := c.Control(req.Key)
-	if control == nil || control.DisabledReason != "" {
-		return control, false
+	if control == nil {
+		return nil, nil, RefuseSetting(SettingRefusedUnknown, "There is no setting called %q here.", req.Key)
 	}
-	switch control.Type {
-	case SettingTypeAction:
-		// An action has no value; one being sent means the client is confused about the control.
-		return control, req.Value == nil
-	case SettingTypeBoolean:
-		_, ok := req.Value.(bool)
-		return control, ok
-	case SettingTypeEnum:
-		value, ok := req.Value.(string)
-		if !ok {
-			return control, false
-		}
-		for _, option := range control.Options {
-			if option.Value == value {
-				return control, true
-			}
-		}
-		return control, false
-	case SettingTypeNumber:
-		_, ok := req.Value.(float64) // JSON numbers
-		return control, ok
-	case SettingTypeText:
-		_, ok := req.Value.(string)
-		return control, ok
-	default:
-		return control, false
+	if control.DisabledReason != "" {
+		return control, nil, RefuseSetting(SettingRefusedDisabled, "%s cannot be changed right now: %s", control.Label, control.DisabledReason)
 	}
+	value, err := control.checkValue(req.Value)
+	if err != nil {
+		return control, nil, RefuseSetting(SettingRefusedInvalid, "%s was not changed: %v.", control.Label, err)
+	}
+	return control, value, nil
 }
 
-/*
- * loginSettings is what this login will let the user change, worked out from what the network
- * actually supports and what the login can do right now.
- *
- * Derived rather than configured: a control that is offered but cannot work is worse than one that
- * is absent, because the user taps it and nothing happens. So backfill appears only for a network
- * that implements it, and is disabled with a reason while the login is not connected.
- */
-func (br *Bridge) loginSettings(login *UserLogin, connected bool) *BridgeSettingsContent {
-	content := &BridgeSettingsContent{
-		Source: BridgeSettingsSource{
-			ID:   br.Network.GetName().NetworkID,
-			Name: br.Network.GetName().DisplayName,
-		},
-	}
-	notConnected := ""
-	if !connected {
-		notConnected = "Not connected to " + br.Network.GetName().DisplayName
-	}
-	if _, ok := login.Client.(BackfillingNetworkAPI); ok {
-		content.Settings = append(content.Settings, BridgeSettingControl{
-			Key:            SettingKeyBackfill,
-			Label:          "Import older messages",
-			Type:           SettingTypeAction,
-			Value:          nil,
-			DisabledReason: notConnected,
-		})
-	}
-	// Relay is the bridge's own doing rather than the network's, so it is offered whatever the
-	// network implements - but only to a user allowed to manage it, since offering a control the
-	// server will refuse is the same lie as offering one that cannot work.
-	if login.User.Permissions.ManageRelay {
-		content.Settings = append(content.Settings, BridgeSettingControl{
-			Key:   SettingKeyRelay,
-			Label: "Carry other people's messages through this account",
-			Type:  SettingTypeBoolean,
-			Value: false,
-		})
-	}
-	return content
+// ValidSet is [BridgeSettingsContent.CheckSet] for a caller that only needs yes or no.
+func (c *BridgeSettingsContent) ValidSet(req *BridgeSettingsSetContent) (*BridgeSettingControl, bool) {
+	control, _, err := c.CheckSet(req)
+	return control, err == nil
 }

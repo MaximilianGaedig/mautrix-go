@@ -119,17 +119,14 @@ func (bsq *BridgeStateQueue) publishLoginState(ctx context.Context, state status
 		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to publish the login's connection state")
 	}
 	// Alongside it, and from the same state, so the two cannot disagree: what is true and what can
-	// be done about it change together, and a control disabled because the login is down has to stop
-	// being disabled at the same moment the login comes back.
-	bsq.publishSettings(ctx, room, state.StateEvent == status.StateConnected)
+	// be done about it change together, and a control disabled because the login was logged out has
+	// to stop being disabled at the same moment it is logged in again.
+	bsq.publishSettings(ctx, room, loginStillLoggedIn(state.StateEvent))
 }
 
 // publishSettings records what this login will let the user change, beside its connection state.
-func (bsq *BridgeStateQueue) publishSettings(ctx context.Context, room id.RoomID, connected bool) {
-	login := bsq.login
-	settings := bsq.bridge.loginSettings(login, connected)
-	_, err := bsq.bridge.Bot.SendState(ctx, room, BridgeSettingsEventType, string(login.ID), &event.Content{Parsed: settings}, time.Time{})
-	if err != nil {
-		zerolog.Ctx(ctx).Warn().Err(err).Msg("Failed to publish the login's settings")
-	}
+// Called on every change of that state, but written only when the controls themselves changed:
+// a reconnect leaves them exactly as they were.
+func (bsq *BridgeStateQueue) publishSettings(ctx context.Context, room id.RoomID, loggedIn bool) {
+	bsq.bridge.publishLoginSettings(ctx, room, bsq.login, loggedIn)
 }

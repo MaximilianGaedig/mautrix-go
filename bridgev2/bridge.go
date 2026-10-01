@@ -57,6 +57,8 @@ type Bridge struct {
 	stopping            atomic.Bool
 	// Set while a final publish of the import totals is already on its way.
 	backfillSummaryPending atomic.Bool
+	// What each room was last told this bridge will let its users change.
+	settingsSent settingsSentCache
 
 	wakeupBackfillQueue chan struct{}
 	stopBackfillQueue   *exsync.Event

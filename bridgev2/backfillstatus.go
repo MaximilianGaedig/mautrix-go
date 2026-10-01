@@ -268,6 +268,15 @@ func (portal *Portal) PublishBackfillStatus(ctx context.Context, source *UserLog
 		log.Err(err).Msg("Failed to compute backfill status")
 		return nil
 	}
+	// The chat's "import older messages" control reads the same task this status was computed from,
+	// and only its state: so it is looked at again exactly when the state moved, however that came
+	// about - the queue, a command, or the control itself.
+	state.lock.Lock()
+	moved := state.last == nil || state.last.State != status.State
+	state.lock.Unlock()
+	if moved {
+		defer portal.PublishSettings(ctx)
+	}
 	state.lock.Lock()
 	defer state.lock.Unlock()
 	if state.last != nil {
@@ -361,6 +370,10 @@ func (br *Bridge) PublishAllBackfillStatuses(ctx context.Context) {
 		if source != nil && status != nil {
 			summaryFor(summaries, source).add(status)
 		}
+		// The one pass over every chat is also where its controls are brought up to date: a chat
+		// from before controls existed gets them here, and one whose controls changed while the
+		// bridge was down (a config switch, say) is corrected. Unchanged ones cost a read.
+		portal.PublishSettings(ctx)
 		time.Sleep(50 * time.Millisecond)
 	}
 	for source, summary := range summaries {
