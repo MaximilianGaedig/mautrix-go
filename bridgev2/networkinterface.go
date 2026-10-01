@@ -674,6 +674,34 @@ type EditHandlingNetworkAPI interface {
 	HandleMatrixEdit(ctx context.Context, msg *MatrixEdit) error
 }
 
+// MatrixAlbumPartResult is what happened to one part of an album in [AlbumHandlingNetworkAPI.HandleMatrixAlbum].
+type MatrixAlbumPartResult struct {
+	// Response is the same as the return value of HandleMatrixMessage would be for this part alone.
+	Response *MatrixMessageResponse
+	// Err is set instead of Response if this part wasn't sent.
+	Err error
+}
+
+// AlbumHandlingNetworkAPI is an optional interface that network connectors can implement to send
+// several media messages to the remote network as one album.
+//
+// Matrix has no album event: a client sends one event per file and marks the ones that belong
+// together with the [AlbumFieldKey] field. If this interface is implemented, the central bridge
+// module holds such events back until all of them have arrived (or have taken too long) and
+// then passes them here together. Without it, they are passed to HandleMatrixMessage one by one.
+type AlbumHandlingNetworkAPI interface {
+	NetworkAPI
+	// HandleMatrixAlbum is called with two or more media messages from the same sender, in the
+	// order they have in the album. The connector doesn't have to send them as a single album:
+	// it can split them if the network limits the size of an album or what can be mixed in one.
+	//
+	// The result must have one entry per message, in the same order. The central bridge module
+	// saves a message row and sends a delivery status for each of them separately, so every
+	// message needs its own response with its own remote message ID. Returning an error
+	// instead means that none of the messages were sent.
+	HandleMatrixAlbum(ctx context.Context, msgs []*MatrixMessage) ([]MatrixAlbumPartResult, error)
+}
+
 type PollHandlingNetworkAPI interface {
 	NetworkAPI
 	HandleMatrixPollStart(ctx context.Context, msg *MatrixPollStart) (*MatrixMessageResponse, error)
