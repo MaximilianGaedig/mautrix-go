@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -44,6 +45,33 @@ type RTCLegConfig struct {
 	// unsubscribed. In a group call only one leg feeds the Matrix user's media to Messenger, and the
 	// other participants' legs take nothing.
 	Accept func(identity string) bool
+	// VideoCodec, when set (webrtc.MimeTypeVP8 or MimeTypeH264), is the one video codec this
+	// participant tells LiveKit it can take and send: the codec of the other network's leg, since
+	// nothing is transcoded between the two. Without it LiveKit hands over the publisher's first
+	// choice (H264 from Element Call), and a network that only does VP8 gets no video although
+	// Element Call would publish a VP8 copy for a subscriber that needs one. It holds for
+	// everything the participant takes or publishes, a shared screen included. Empty, or a codec
+	// the bridge doesn't relay, leaves the SDK's defaults in place.
+	VideoCodec string
+}
+
+// rtcCodecs is what a LiveKit participant that relays only the video codec mime says it supports:
+// Opus and that codec, with the parameters the bridge publishes it under (videoCapability). It is nil
+// (no restriction) for an empty mime and for a codec the bridge doesn't relay.
+//
+// RED is left out on purpose: offered, LiveKit may hand over a publisher's audio as RED, and the relay
+// forwards Opus payloads only (the SDK's defaults have no RED either). So is RTX: the SDK's codec
+// list gives it payload type 0 and no codec to repair, which Pion reads as no RTX at all.
+func rtcCodecs(mime string) []livekit.Codec {
+	for _, c := range videoCodecs {
+		if strings.EqualFold(c.MimeType, mime) {
+			return []livekit.Codec{
+				{Mime: webrtc.MimeTypeOpus},
+				{Mime: c.MimeType, FmtpLine: c.SDPFmtpLine},
+			}
+		}
+	}
+	return nil
 }
 
 // RTCLeg is the bridge's side of a MatrixRTC (Element Call / Element X) call: a LiveKit participant,
@@ -54,6 +82,9 @@ type RTCLeg struct {
 	log    zerolog.Logger
 	accept func(identity string) bool
 	room   *lksdk.Room
+	// videoCodec is the one video codec the participant joined with (RTCLegConfig.VideoCodec), or
+	// "" when it joined with every codec.
+	videoCodec string
 
 	audio *webrtc.TrackLocalStaticRTP
 
@@ -112,8 +143,15 @@ func JoinRTC(ctx context.Context, cfg RTCLegConfig) (*RTCLeg, error) {
 		err  error
 	}
 	done := make(chan result, 1)
+	opts := []lksdk.ConnectOption{lksdk.WithAutoSubscribe(true)}
+	if codecs := rtcCodecs(cfg.VideoCodec); codecs != nil {
+		opts = append(opts, lksdk.WithCodecs(codecs))
+		l.videoCodec = cfg.VideoCodec
+	} else if cfg.VideoCodec != "" {
+		cfg.Log.Warn().Str("video_codec", cfg.VideoCodec).Msg("Not a video codec the bridge relays, joining with every codec")
+	}
 	go func() {
-		room, err := lksdk.ConnectToRoomWithToken(cfg.URL, cfg.Token, cb, lksdk.WithAutoSubscribe(true))
+		room, err := lksdk.ConnectToRoomWithToken(cfg.URL, cfg.Token, cb, opts...)
 		done <- result{room, err}
 	}()
 	var res result
@@ -171,6 +209,11 @@ func (l *RTCLeg) addVideo(mime string, slot **videoOut, source livekit.TrackSour
 	defer l.mu.Unlock()
 	if *slot != nil {
 		return *slot, nil
+	}
+	if l.videoCodec != "" && !strings.EqualFold(mime, l.videoCodec) {
+		// The SDK publishes it all the same, and nobody is ever sent it: the connection has no such
+		// codec to send it as.
+		return nil, fmt.Errorf("publish %s as %s: the participant joined with %s only", name, mime, l.videoCodec)
 	}
 	// A LiveKit LocalTrack rather than a static one: it hands us the subscribers' keyframe requests
 	// (PLI/FIR), which the SDK otherwise swallows.

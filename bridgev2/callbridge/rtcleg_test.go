@@ -17,19 +17,24 @@
 package callbridge
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"net"
 	"os"
 	"os/exec"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/livekit/protocol/auth"
+	protoCodecs "github.com/livekit/protocol/codecs"
 	"github.com/livekit/protocol/livekit"
+	lksdk "github.com/livekit/server-sdk-go/v2"
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
+	"github.com/pion/webrtc/v4/pkg/media"
 	"github.com/rs/zerolog"
 )
 
@@ -149,6 +154,193 @@ func TestRTCLegRelaysAudio(t *testing.T) {
 		if _, _, err := track.ReadRTP(); err != nil {
 			t.Fatalf("read: %v", err)
 		}
+	}
+}
+
+// What a participant restricted to one video codec offers LiveKit: Opus and that codec, with the
+// very parameters the bridge publishes it under - a different H264 profile or packetization mode
+// would be another codec to Pion, and the publication would find nothing to send as.
+func TestRTCCodecs(t *testing.T) {
+	for _, mime := range []string{webrtc.MimeTypeVP8, webrtc.MimeTypeH264, "video/h264"} {
+		codecs := rtcCodecs(mime)
+		if len(codecs) != 2 {
+			t.Fatalf("%s: %d codecs, want Opus and the video codec", mime, len(codecs))
+		}
+		audio := protoCodecs.ToWebrtcCodecParameters(&codecs[0])
+		if audio.MimeType != webrtc.MimeTypeOpus || audio.PayloadType != OpusPT {
+			t.Errorf("%s: audio %s under %d, want Opus under %d", mime, audio.MimeType, audio.PayloadType, OpusPT)
+		}
+		video := protoCodecs.ToWebrtcCodecParameters(&codecs[1])
+		want := videoCapability(video.MimeType)
+		if !strings.EqualFold(video.MimeType, mime) || video.ClockRate != want.ClockRate || video.SDPFmtpLine != want.SDPFmtpLine {
+			t.Errorf("%s: registered as %s/%d %q, published as %s/%d %q", mime,
+				video.MimeType, video.ClockRate, video.SDPFmtpLine, want.MimeType, want.ClockRate, want.SDPFmtpLine)
+		}
+		if video.PayloadType == 0 {
+			t.Errorf("%s: no payload type", mime)
+		}
+	}
+	// No codec asked for, or one the bridge can't relay: the SDK's defaults, as before.
+	for _, mime := range []string{"", webrtc.MimeTypeAV1, "video/unheard-of", webrtc.MimeTypeOpus} {
+		if codecs := rtcCodecs(mime); codecs != nil {
+			t.Errorf("%q restricts the participant to %d codecs, want no restriction", mime, len(codecs))
+		}
+	}
+}
+
+// A participant that joined with one video codec can't send another: asked to, the SDK publishes a
+// track that never reaches anyone. The camera or screen is refused instead, where it can be seen.
+func TestRTCLegRefusesAnotherVideoCodec(t *testing.T) {
+	leg := &RTCLeg{videoCodec: webrtc.MimeTypeVP8}
+	if _, err := leg.AddScreenTrack(webrtc.MimeTypeH264); err == nil {
+		t.Error("an H264 screen was published by a participant that joined with VP8 only")
+	}
+	if _, err := leg.AddVideoTrack(webrtc.MimeTypeH264); err == nil {
+		t.Error("an H264 camera was published by a participant that joined with VP8 only")
+	}
+}
+
+// keyFrames are the smallest key frames of each codec, as the LiveKit SDK's own tests send them: the
+// server forwards a video to a subscriber from a key frame on, so anything else never arrives.
+var keyFrames = map[string][]byte{
+	webrtc.MimeTypeVP8: {
+		0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a, 0x08, 0x00, 0x08, 0x00, 0x00, 0x47, 0x08, 0x85, 0x85, 0x88,
+		0x85, 0x84, 0x88, 0x02, 0x02, 0x00, 0x0c, 0x0d, 0x60, 0x00, 0xfe, 0xff, 0xab, 0x50, 0x80,
+	},
+	// SPS, PPS and an IDR slice, in Annex B.
+	webrtc.MimeTypeH264: {
+		0, 0, 0, 1, 0x67, 0x42, 0xc0, 0x1f, 0x0f, 0xd9, 0x1f, 0x88, 0x88, 0x84, 0x00, 0x00, 0x03, 0x00,
+		0x04, 0x00, 0x00, 0x03, 0x00, 0xc8, 0x3c, 0x60, 0xc9, 0x20,
+		0, 0, 0, 1, 0x68, 0x87, 0xcb, 0x83, 0xcb, 0x20,
+		0, 0, 0, 1, 0x65, 0x88, 0x84, 0x0a, 0xf2, 0x62, 0x80, 0x00, 0xa7, 0xbe,
+	},
+}
+
+// keyFrameTrack is a LiveKit track of the codec that sends its key frame ten times a second.
+func keyFrameTrack(t *testing.T, ctx context.Context, mime string) *lksdk.LocalTrack {
+	t.Helper()
+	track, err := lksdk.NewLocalTrack(videoCapability(mime))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		for ctx.Err() == nil {
+			_ = track.WriteSample(media.Sample{Data: keyFrames[mime], Duration: 100 * time.Millisecond}, nil)
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+	return track
+}
+
+// keyFramePackets writes the codec's key frame as RTP into a bridge leg's video, ten times a second.
+func keyFramePackets(ctx context.Context, mime string, to RTPWriter) {
+	// The frame as RTP payloads: VP8 behind its one-byte descriptor (start of partition 0), H264 one
+	// NAL unit to a packet.
+	var payloads [][]byte
+	if mime == webrtc.MimeTypeVP8 {
+		payloads = [][]byte{append([]byte{0x10}, keyFrames[mime]...)}
+	} else {
+		for _, nalu := range bytes.Split(keyFrames[mime], []byte{0, 0, 0, 1})[1:] {
+			payloads = append(payloads, nalu)
+		}
+	}
+	seq := uint16(0)
+	for frame := uint32(0); ctx.Err() == nil; frame++ {
+		for i, payload := range payloads {
+			_ = to.WriteRTP(&rtp.Packet{
+				Header:  rtp.Header{Version: 2, SequenceNumber: seq, Timestamp: frame * 9000, Marker: i == len(payloads)-1},
+				Payload: payload,
+			})
+			seq++
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// Element Call sends its camera as H264 and, in a call that isn't encrypted, a VP8 copy for whoever
+// can't take H264. The bridge can't transcode: joined with every codec it is handed the H264, which
+// a network that only does VP8 has no use for. Restricted to the other leg's codec it gets that
+// codec, and what it publishes itself still arrives.
+func TestRTCLegTakesOnlyItsVideoCodec(t *testing.T) {
+	url := startLiveKit(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	log := zerolog.New(zerolog.NewTestWriter(t)).Level(zerolog.InfoLevel)
+
+	// Element Call's stand-in, which also watches what the bridge's participants publish.
+	type seen struct {
+		identity string
+		codec    webrtc.RTPCodecCapability
+	}
+	subscribed := make(chan seen, 16)
+	cb := lksdk.NewRoomCallback()
+	cb.OnTrackSubscribed = func(track *webrtc.TrackRemote, _ *lksdk.RemoteTrackPublication, rp *lksdk.RemoteParticipant) {
+		subscribed <- seen{rp.Identity(), track.Codec().RTPCodecCapability}
+	}
+	element, err := lksdk.ConnectToRoomWithToken(url, devToken(t, "call", "@mg:x:ELEMENT"), cb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer element.Disconnect()
+	if _, err = element.LocalParticipant.PublishTrack(
+		keyFrameTrack(t, ctx, webrtc.MimeTypeH264),
+		&lksdk.TrackPublicationOptions{Name: "camera", Source: livekit.TrackSource_CAMERA, BackupCodecPolicy: livekit.BackupCodecPolicy_SIMULCAST},
+		lksdk.WithBackupCodec(keyFrameTrack(t, ctx, webrtc.MimeTypeVP8)),
+	); err != nil {
+		t.Fatal(err)
+	}
+	// waitFor returns the codec Element was handed the identity's audio or video track in.
+	waitFor := func(identity, kind string) webrtc.RTPCodecCapability {
+		t.Helper()
+		for {
+			select {
+			case s := <-subscribed:
+				if s.identity == identity && strings.HasPrefix(s.codec.MimeType, kind+"/") {
+					return s.codec
+				}
+			case <-ctx.Done():
+				t.Fatalf("Element never got %s's %s", identity, kind)
+			}
+		}
+	}
+
+	for _, c := range []struct{ name, restrict, takes string }{
+		{"unrestricted", "", webrtc.MimeTypeH264},
+		{"VP8", webrtc.MimeTypeVP8, webrtc.MimeTypeVP8},
+		{"H264", webrtc.MimeTypeH264, webrtc.MimeTypeH264},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			identity := "@ghost:x:" + c.name
+			ghost, err := JoinRTC(ctx, RTCLegConfig{URL: url, Token: devToken(t, "call", identity), VideoCodec: c.restrict, Log: log})
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer ghost.Close()
+
+			track, err := ghost.RemoteVideo(ctx)
+			if err != nil {
+				t.Fatalf("no video from Element: %v", err)
+			}
+			if got := track.Codec().MimeType; got != c.takes {
+				t.Fatalf("handed Element's camera as %s, want %s", got, c.takes)
+			}
+			if _, _, err = track.ReadRTP(); err != nil {
+				t.Fatalf("read: %v", err)
+			}
+
+			// The other network's audio and video, published by the same participant, reach Element.
+			if got := waitFor(identity, "audio"); got.MimeType != webrtc.MimeTypeOpus {
+				t.Errorf("Element got the bridge's audio as %s", got.MimeType)
+			}
+			out, err := ghost.AddVideoTrack(c.takes)
+			if err != nil {
+				t.Fatalf("publishing %s: %v", c.takes, err)
+			}
+			go keyFramePackets(ctx, c.takes, out)
+			if got, want := waitFor(identity, "video"), videoCapability(c.takes); got.MimeType != want.MimeType || got.SDPFmtpLine != want.SDPFmtpLine {
+				t.Errorf("Element got the bridge's video as %s %q, want %s %q", got.MimeType, got.SDPFmtpLine, want.MimeType, want.SDPFmtpLine)
+			}
+		})
 	}
 }
 
