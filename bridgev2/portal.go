@@ -4232,8 +4232,16 @@ type PortalInfo = ChatInfo
 type ChatMember struct {
 	EventSender
 	Membership event.Membership
-	// Per-room nickname for the user. Not yet used.
+	// What the user is called in this room only. It goes into the ghost's member event in the
+	// room and leaves the ghost's global profile alone. Nil means the network said nothing and the
+	// member event is left as it is; a pointer to an empty string means the user has no nickname
+	// here (any more), so the member event goes back to the global name.
+	//
+	// It is never applied to the member event of a real Matrix user (a double puppet).
 	Nickname *string
+	// The avatar the user has in this room only, already uploaded. Nil and empty mean the same as
+	// for Nickname.
+	RoomAvatar *id.ContentURIString
 	// The power level to set for the user when syncing power levels.
 	PowerLevel *int
 	// Optional user info to sync the ghost user while updating membership.
@@ -5116,6 +5124,15 @@ func (portal *Portal) syncParticipants(
 		currentMember, ok := currentMembers[extraUserID]
 		delete(currentMembers, extraUserID)
 		if ok && currentMember.Membership == member.Membership {
+			// The membership is right, but what the ghost is called in this room may not be.
+			if profile := portal.roomProfileUpdate(ctx, extraUserID, currentMember, &member, intent); profile != nil {
+				wrappedProfile := &event.Content{Parsed: profile, Raw: map[string]any{}}
+				addExcludeFromTimeline(wrappedProfile.Raw)
+				_, err = intent.SendState(ctx, portal.MXID, event.StateMember, extraUserID.String(), wrappedProfile, ts)
+				if err != nil {
+					log.Err(err).Stringer("target_user_id", extraUserID).Msg("Failed to update room profile")
+				}
+			}
 			return false
 		}
 		if currentMember == nil {
@@ -5135,6 +5152,7 @@ func (portal *Portal) syncParticipants(
 			Displayname: currentMember.Displayname,
 			AvatarURL:   currentMember.AvatarURL,
 		}
+		portal.applyRoomProfile(ctx, extraUserID, content, &member, intent)
 		wrappedContent := &event.Content{Parsed: content, Raw: exmaps.NonNilClone(member.MemberEventExtra)}
 		addExcludeFromTimeline(wrappedContent.Raw)
 		thisEvtSender := sender
@@ -5223,7 +5241,7 @@ func (portal *Portal) syncParticipants(
 			if err != nil {
 				zerolog.Ctx(ctx).Err(err).Str("ghost_id", string(member.Sender)).Msg("Failed to get ghost from member list to update info")
 			} else {
-				if current, ok := currentMembers[ghost.Intent.GetMXID()]; ok && current.Membership == event.MembershipJoin && ptr.Val(member.Nickname) == "" {
+				if current, ok := currentMembers[ghost.Intent.GetMXID()]; ok && current.Membership == event.MembershipJoin && ptr.Val(member.Nickname) == "" && ptr.Val(member.RoomAvatar) == "" && !ghost.expectsRoomProfile(ctx, portal.MXID, &member) {
 					ghost.reconcileProfile(ctx, current, member.UserInfo)
 				}
 				ghost.UpdateInfo(ctx, member.UserInfo)
@@ -5270,6 +5288,8 @@ func (portal *Portal) syncParticipants(
 				zerolog.Ctx(ctx).Err(err).
 					Stringer("user_id", extraMember).
 					Msg("Failed to remove user from room")
+			} else if ghost, _ := portal.Bridge.GetGhostByMXID(ctx, extraMember); ghost != nil {
+				ghost.forgetRoomProfile(ctx, portal.MXID)
 			}
 		}
 	}
