@@ -45,4 +45,16 @@ func TestProfilePropagation(t *testing.T) {
 		const query = "?computer.gingershaped.msc4466.propagate_to=unchanged"
 		assert.Equal(t, []string{base + "displayname" + query, base + "avatar_url" + query}, queries)
 	})
+	// A bridge's ghost: the appservice names the user in the query, and the mode has to join that
+	// query rather than start a second one, or the homeserver reads it as part of the user ID.
+	t.Run("the mode joins the query an appservice client already has", func(t *testing.T) {
+		queries = nil
+		client.SetAppServiceUserID = true
+		t.Cleanup(func() { client.SetAppServiceUserID = false })
+		ctx := WithProfilePropagation(context.Background(), ProfilePropagationUnchanged)
+		require.NoError(t, client.SetDisplayName(ctx, "Ghost"))
+		require.NoError(t, client.SetAvatarURL(ctx, avatar))
+		const query = "?user_id=%40ghost%3Aexample.org&computer.gingershaped.msc4466.propagate_to=unchanged"
+		assert.Equal(t, []string{base + "displayname" + query, base + "avatar_url" + query}, queries)
+	})
 }

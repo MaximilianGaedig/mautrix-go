@@ -9,6 +9,7 @@ package mautrix
 import (
 	"context"
 	"net/url"
+	"strings"
 )
 
 // ProfilePropagation says which rooms should get a new member event when the global display name
@@ -40,12 +41,16 @@ func WithProfilePropagation(ctx context.Context, mode ProfilePropagation) contex
 	return context.WithValue(ctx, profilePropagationKey{}, mode)
 }
 
-// addProfilePropagation adds the mode asked for in the context to a profile URL that has no query
-// yet.
+// addProfilePropagation adds the mode asked for in the context to a profile URL. The URL may
+// already have a query: an appservice client names the user it acts for in one (?user_id=…).
 func addProfilePropagation(ctx context.Context, urlPath string) string {
 	mode, _ := ctx.Value(profilePropagationKey{}).(ProfilePropagation)
 	if mode == "" {
 		return urlPath
 	}
-	return urlPath + "?" + url.Values{profilePropagationParam: {string(mode)}}.Encode()
+	separator := "?"
+	if strings.Contains(urlPath, "?") {
+		separator = "&"
+	}
+	return urlPath + separator + url.Values{profilePropagationParam: {string(mode)}}.Encode()
 }
