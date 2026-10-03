@@ -109,6 +109,7 @@ func doUpgrade(helper up.Helper) {
 
 	helper.Copy(up.Bool, "matrix", "message_status_events")
 	helper.Copy(up.Bool, "matrix", "delivery_receipts")
+	helper.Copy(up.Bool, "matrix", "message_status_failures_only")
 	helper.Copy(up.Bool, "matrix", "message_error_notices")
 	helper.Copy(up.Bool, "matrix", "sync_direct_chat_list")
 	helper.Copy(up.Bool, "matrix", "federate_rooms")

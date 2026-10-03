@@ -98,13 +98,16 @@ type BridgeConfig struct {
 }
 
 type MatrixConfig struct {
-	MessageStatusEvents   bool  `yaml:"message_status_events"`
-	DeliveryReceipts      bool  `yaml:"delivery_receipts"`
-	MessageErrorNotices   bool  `yaml:"message_error_notices"`
-	SyncDirectChatList    bool  `yaml:"sync_direct_chat_list"`
-	FederateRooms         bool  `yaml:"federate_rooms"`
-	UploadFileThreshold   int64 `yaml:"upload_file_threshold"`
-	GhostExtraProfileInfo bool  `yaml:"ghost_extra_profile_info"`
+	MessageStatusEvents bool `yaml:"message_status_events"`
+	DeliveryReceipts    bool `yaml:"delivery_receipts"`
+	// MessageStatusFailuresOnly keeps successes out of the room: a status event follows every message
+	// otherwise. Success is then the bot's delivery receipt (DeliveryReceipts).
+	MessageStatusFailuresOnly bool  `yaml:"message_status_failures_only"`
+	MessageErrorNotices       bool  `yaml:"message_error_notices"`
+	SyncDirectChatList        bool  `yaml:"sync_direct_chat_list"`
+	FederateRooms             bool  `yaml:"federate_rooms"`
+	UploadFileThreshold       int64 `yaml:"upload_file_threshold"`
+	GhostExtraProfileInfo     bool  `yaml:"ghost_extra_profile_info"`
 }
 
 type AnalyticsConfig struct {

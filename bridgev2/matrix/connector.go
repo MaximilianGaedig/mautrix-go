@@ -571,7 +571,7 @@ func (br *Connector) internalSendMessageStatus(ctx context.Context, ms *bridgev2
 		}
 	}
 
-	if !ms.DisableMSS && br.Config.Matrix.MessageStatusEvents {
+	if sendsStatusEvent(&br.Config.Matrix, ms) {
 		mssEvt := ms.ToMSSEvent(evt)
 		_, err := br.Bot.SendMessageEvent(ctx, evt.RoomID, event.BeeperMessageStatus, mssEvt)
 		if err != nil {
@@ -609,6 +609,16 @@ func (br *Connector) internalSendMessageStatus(ctx context.Context, ms *bridgev2
 		}
 	}
 	return ""
+}
+
+// sendsStatusEvent says whether a message status goes into the room as a com.beeper.message_send_status
+// event. With message_status_failures_only, a plain success does not: it would follow every message.
+func sendsStatusEvent(cfg *bridgeconfig.MatrixConfig, ms *bridgev2.MessageStatus) bool {
+	if ms.DisableMSS || !cfg.MessageStatusEvents {
+		return false
+	}
+	plainSuccess := ms.Status == event.MessageStatusSuccess && len(ms.DeliveredTo) == 0
+	return !(plainSuccess && cfg.MessageStatusFailuresOnly)
 }
 
 func (br *Connector) SendMessageCheckpoints(ctx context.Context, checkpoints []*status.MessageCheckpoint) error {

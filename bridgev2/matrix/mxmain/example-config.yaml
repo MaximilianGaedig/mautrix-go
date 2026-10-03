@@ -274,6 +274,10 @@ matrix:
     message_status_events: false
     # Whether the bridge should send a read receipt after successfully bridging a message.
     delivery_receipts: false
+    # Whether message status events are only sent when something goes wrong (and when a network reports
+    # delivery to the recipient). Every bridged message is otherwise followed by one in the room's timeline.
+    # Turn on delivery_receipts with it, so that a success still says something.
+    message_status_failures_only: false
     # Whether the bridge should send error notices via m.notice events when a message fails to bridge.
     message_error_notices: true
     # Whether the bridge should update the m.direct account data event when double puppeting is enabled.
