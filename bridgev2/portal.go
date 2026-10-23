@@ -950,6 +950,8 @@ func (portal *Portal) handleMatrixEvent(ctx context.Context, sender *User, evt *
 		return portal.handleMatrixPowerLevels(ctx, login, origSender, evt, isStateRequest)
 	case event.BeeperDeleteChat:
 		return portal.handleMatrixDeleteChat(ctx, login, origSender, evt)
+	case event.BeeperBlockUser:
+		return portal.handleMatrixBlockUser(ctx, login, origSender, evt)
 	case event.BeeperAcceptMessageRequest:
 		return portal.handleMatrixAcceptMessageRequest(ctx, login, origSender, evt)
 	default:
@@ -1422,7 +1424,8 @@ func (portal *Portal) handleMatrixMessage(ctx context.Context, sender *UserLogin
 				Stringer("message_mxid", part.MXID).
 				Stringer("input_event_id", evt.ID).
 				Msg("Message already sent, ignoring")
-			return EventHandlingResultIgnored
+			portal.sendSuccessStatus(ctx, evt, 0, part.MXID, nil)
+			return EventHandlingResultIgnored.WithEventID(part.MXID)
 		}
 	}
 
@@ -2098,6 +2101,48 @@ func (portal *Portal) autoAcceptMessageRequest(
 	return nil
 }
 
+func (portal *Portal) handleMatrixBlockUser(
+	ctx context.Context,
+	sender *UserLogin,
+	origSender *OrigSender,
+	evt *event.Event,
+) EventHandlingResult {
+	if origSender != nil {
+		return EventHandlingResultFailed.WithMSSError(ErrIgnoringBlockUserRelayedUser)
+	}
+	log := zerolog.Ctx(ctx)
+	content, ok := evt.Content.Parsed.(*event.BeeperBlockUserEventContent)
+	if !ok {
+		log.Error().Type("content_type", evt.Content.Parsed).Msg("Unexpected parsed content type")
+		return EventHandlingResultFailed.WithMSSError(fmt.Errorf("%w: %T", ErrUnexpectedParsedContentType, evt.Content.Parsed))
+	}
+	api, ok := sender.Client.(UserBlockingNetworkAPI)
+	if !ok {
+		return EventHandlingResultIgnored.WithMSSError(ErrBlockUserNotSupported)
+	} else if portal.RoomType != database.RoomTypeDM {
+		return EventHandlingResultFailed.WithMSSError(ErrNonDMBlockUser)
+	}
+	err := api.HandleMatrixBlockUser(ctx, &MatrixBlockUser{
+		Event:   evt,
+		Content: content,
+		Portal:  portal,
+	})
+	if err != nil {
+		log.Err(err).Msg("Failed to handle Matrix block user event")
+		return EventHandlingResultFailed.WithMSSError(err)
+	}
+
+	if portal.UserBlocked != content.Block {
+		portal.UserBlocked = content.Block
+		portal.UpdateBridgeInfo(ctx)
+		err = portal.Save(ctx)
+		if err != nil {
+			log.Err(err).Msg("Failed to save portal after block event")
+		}
+	}
+	return EventHandlingResultSuccess.WithMSS()
+}
+
 func (portal *Portal) handleMatrixDeleteChat(
 	ctx context.Context,
 	sender *UserLogin,
@@ -2752,9 +2797,14 @@ func (portal *Portal) handleRemoteEvent(ctx context.Context, source *UserLogin, 
 			return EventHandlingResultSuccess
 		}
 	}
-	preHandler, ok := evt.(RemotePreHandler)
-	if ok {
-		preHandler.PreHandle(ctx, portal)
+
+	if preHandler, ok := evt.(RemotePreHandlerWithResult); ok {
+		resPtr := preHandler.PreHandleWithResult(ctx, portal)
+		if resPtr != nil {
+			return *resPtr
+		}
+	} else if oldPreHandler, ok := evt.(RemotePreHandler); ok {
+		oldPreHandler.PreHandle(ctx, portal)
 	}
 	log.Debug().Msg("Handling remote event")
 	switch evtType {
@@ -4120,10 +4170,13 @@ func (portal *Portal) handleRemoteTyping(ctx context.Context, source *UserLogin,
 }
 
 func (portal *Portal) handleRemoteChatInfoChange(ctx context.Context, source *UserLogin, evt RemoteChatInfoChange) EventHandlingResult {
-	info, err := evt.GetChatInfoChange(ctx)
+	info, err := evt.GetChatInfoChange(ctx, portal)
 	if err != nil {
 		zerolog.Ctx(ctx).Err(err).Msg("Failed to get chat info change")
 		return EventHandlingResultFailed.WithError(err)
+	} else if info == nil {
+		zerolog.Ctx(ctx).Debug().Msg("No chat info change received")
+		return EventHandlingResultIgnored
 	}
 	portal.ProcessChatInfoChange(ctx, evt.GetSender(), source, info, getEventTS(evt))
 	return EventHandlingResultSuccess
@@ -4484,6 +4537,7 @@ type ChatInfo struct {
 
 	UserLocal      *UserLocalPortalInfo
 	MessageRequest *bool
+	UserBlocked    *bool
 	CanBackfill    bool
 
 	ExcludeChangesFromTimeline bool
@@ -4864,16 +4918,13 @@ func (portal *Portal) getBridgeInfo() (string, event.BridgeEventContent) {
 			AvatarURL:      portal.AvatarMXC,
 			Receiver:       string(portal.Receiver),
 			MessageRequest: portal.MessageRequest,
+			UserBlocked:    portal.UserBlocked,
 			// TODO external URL?
 		},
 		BeeperRoomTypeV2: string(portal.RoomType),
 	}
 	if portal.RoomType == database.RoomTypeDM || portal.RoomType == database.RoomTypeGroupDM {
 		bridgeInfo.BeeperRoomType = "dm"
-	}
-	if bridgeInfo.Protocol.ID == "slackgo" {
-		bridgeInfo.TempSlackRemoteIDMigratedFlag = true
-		bridgeInfo.TempSlackRemoteIDMigratedFlag2 = true
 	}
 	parent := portal.GetTopLevelParent()
 	if parent != nil {
@@ -5637,6 +5688,10 @@ func (portal *Portal) UpdateInfo(ctx context.Context, info *ChatInfo, source *Us
 	if info.MessageRequest != nil && *info.MessageRequest != portal.MessageRequest {
 		changed = true
 		portal.MessageRequest = *info.MessageRequest
+	}
+	if info.UserBlocked != nil && *info.UserBlocked != portal.UserBlocked && portal.RoomType == database.RoomTypeDM {
+		changed = true
+		portal.UserBlocked = *info.UserBlocked
 	}
 	if info.Members != nil && portal.MXID != "" && source != nil {
 		err := portal.syncParticipants(ctx, info.Members, source, nil, time.Time{})

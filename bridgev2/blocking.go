@@ -18,10 +18,11 @@ import (
 	"maunium.net/go/mautrix/id"
 )
 
-// UserBlockingNetworkAPI is an optional interface that network connectors can implement to block people.
+// IgnoreListBlockingNetworkAPI is an optional interface that network connectors can implement to block people.
 // Matrix's block is the user's ignore list: ignoring a ghost blocks the person it stands for, and
-// un-ignoring it unblocks them.
-type UserBlockingNetworkAPI interface {
+// un-ignoring it unblocks them. Upstream's UserBlockingNetworkAPI is the separate per-DM block event
+// (com.beeper.block_user); a connector may implement both.
+type IgnoreListBlockingNetworkAPI interface {
 	NetworkAPI
 	HandleMatrixBlock(ctx context.Context, ghost *Ghost, blocked bool) error
 }
@@ -84,7 +85,7 @@ func (br *Bridge) HandleIgnoredUserList(ctx context.Context, evt *event.Event) {
 			return
 		}
 		for _, login := range user.GetUserLogins() {
-			api, ok := login.Client.(UserBlockingNetworkAPI)
+			api, ok := login.Client.(IgnoreListBlockingNetworkAPI)
 			if !ok {
 				continue
 			}

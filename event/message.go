@@ -51,9 +51,9 @@ const (
 	MsgAudio    MessageType = "m.audio"
 	MsgFile     MessageType = "m.file"
 
-	MsgVerificationRequest MessageType = "m.key.verification.request"
+	MsgUnstableGallery MessageType = "dm.filament.gallery"
 
-	MsgBeeperGallery MessageType = "com.beeper.gallery"
+	MsgVerificationRequest MessageType = "m.key.verification.request"
 )
 
 // Format specifies the format of the formatted_body in m.room.message events.
@@ -114,32 +114,31 @@ type MessageEventContent struct {
 	GeoURI string `json:"geo_uri,omitempty"`
 
 	// Extra fields for media types
-	URL  id.ContentURIString `json:"url,omitempty"`
-	Info *FileInfo           `json:"info,omitempty"`
-	File *EncryptedFileInfo  `json:"file,omitempty"`
+	URL      id.ContentURIString `json:"url,omitempty"`
+	Info     *FileInfo           `json:"info,omitempty"`
+	File     *EncryptedFileInfo  `json:"file,omitempty"`
+	FileName string              `json:"filename,omitempty"`
 
-	FileName string `json:"filename,omitempty"`
-
-	Mentions *Mentions `json:"m.mentions,omitempty"`
+	UnstableGalleryItemType MessageType            `json:"itemtype,omitempty"`
+	UnstableGalleryItems    []*MessageEventContent `json:"itemtypes,omitempty"`
+	GalleryItems            []*MessageEventContent `json:"items,omitempty"`
 
 	// Edits and relations
 	NewContent *MessageEventContent `json:"m.new_content,omitempty"`
 	RelatesTo  *RelatesTo           `json:"m.relates_to,omitempty"`
+	Mentions   *Mentions            `json:"m.mentions,omitempty"`
+
+	replyFallbackRemoved bool
 
 	// In-room verification
 	To         id.UserID            `json:"to,omitempty"`
 	FromDevice id.DeviceID          `json:"from_device,omitempty"`
 	Methods    []VerificationMethod `json:"methods,omitempty"`
 
-	replyFallbackRemoved bool
-
 	ImageSourcePacks map[id.ContentURIString]*ImageSource    `json:"com.beeper.msc4459.image_source_packs,omitempty"`
 	BridgedEmojis    map[id.ContentURIString]*BridgedSticker `json:"com.beeper.bridged_emojis,omitempty"`
 
 	MessageSendRetry             *BeeperRetryMetadata     `json:"com.beeper.message_send_retry,omitempty"`
-	BeeperGalleryImages          []*MessageEventContent   `json:"com.beeper.gallery.images,omitempty"`
-	BeeperGalleryCaption         string                   `json:"com.beeper.gallery.caption,omitempty"`
-	BeeperGalleryCaptionHTML     string                   `json:"com.beeper.gallery.caption_html,omitempty"`
 	BeeperPerMessageProfile      *BeeperPerMessageProfile `json:"com.beeper.per_message_profile,omitempty"`
 	BeeperActionMessage          *BeeperActionMessage     `json:"com.beeper.action_message,omitempty"`
 	BeeperLinkPreviews           []*BeeperLinkPreview     `json:"com.beeper.linkpreviews,omitzero"`
@@ -218,20 +217,22 @@ func (content *MessageEventContent) SetRelatesTo(rel *RelatesTo) {
 
 func (content *MessageEventContent) SetEdit(original id.EventID) {
 	newContent := *content
-	content.NewContent = &newContent
-	content.RelatesTo = (&RelatesTo{}).SetReplace(original)
+	*content = MessageEventContent{
+		MsgType:    content.MsgType,
+		Body:       content.Body,
+		GeoURI:     content.GeoURI,
+		URL:        content.URL,
+		File:       content.File,
+		FileName:   content.FileName,
+		Mentions:   &Mentions{},
+		NewContent: &newContent,
+		RelatesTo:  (&RelatesTo{}).SetReplace(original),
+	}
 	if content.MsgType == MsgText || content.MsgType == MsgNotice {
 		content.Body = "* " + content.Body
-		content.Mentions = &Mentions{}
-		if content.Format == FormatHTML && len(content.FormattedBody) > 0 {
-			content.FormattedBody = "* " + content.FormattedBody
-		}
-		// If the message is long, remove most of the useless edit fallback to avoid event size issues.
-		if len(content.Body) > 10000 || len(content.FormattedBody) > 10000 {
-			content.FormattedBody = ""
-			content.Format = ""
-			content.Body = content.Body[:min(len(content.Body), 50)] + "[edit fallback cut…]"
-		}
+	}
+	if len(content.Body) > 100 {
+		content.Body = content.Body[:min(len(content.Body), 50)] + "[edit fallback cut…]"
 	}
 }
 

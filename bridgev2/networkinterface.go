@@ -343,6 +343,11 @@ type NetworkResettingNetwork interface {
 	ResetNetworkConnections()
 }
 
+type SplitPortalMigratingNetwork interface {
+	NetworkConnector
+	PreSplitPortalMigrate(context.Context) error
+}
+
 type RemoteEchoHandler func(RemoteMessage, *database.Message) (bool, error)
 
 type MatrixMessageResponse struct {
@@ -843,6 +848,14 @@ type MessageRequestAcceptingNetworkAPI interface {
 	HandleMatrixAcceptMessageRequest(ctx context.Context, msg *MatrixAcceptMessageRequest) error
 }
 
+// UserBlockingNetworkAPI is an optional interface that network connectors
+// can implement to block and unblock users on the remote network.
+type UserBlockingNetworkAPI interface {
+	NetworkAPI
+	// HandleMatrixBlockUser is called when the user blocks a remote user.
+	HandleMatrixBlockUser(ctx context.Context, msg *MatrixBlockUser) error
+}
+
 type ResolveIdentifierResponse struct {
 	// Ghost is the ghost of the user that the identifier resolves to.
 	// This field should be set whenever possible. However, it is not required,
@@ -1293,6 +1306,11 @@ type RemotePreHandler interface {
 	PreHandle(ctx context.Context, portal *Portal)
 }
 
+type RemotePreHandlerWithResult interface {
+	RemoteEvent
+	PreHandleWithResult(ctx context.Context, portal *Portal) *EventHandlingResult
+}
+
 type RemotePostHandler interface {
 	RemoteEvent
 	PostHandle(ctx context.Context, portal *Portal)
@@ -1300,7 +1318,7 @@ type RemotePostHandler interface {
 
 type RemoteChatInfoChange interface {
 	RemoteEvent
-	GetChatInfoChange(ctx context.Context) (*ChatInfoChange, error)
+	GetChatInfoChange(ctx context.Context, portal *Portal) (*ChatInfoChange, error)
 }
 
 type RemoteChatResync interface {
@@ -1666,6 +1684,7 @@ type MatrixViewingChat struct {
 }
 
 type MatrixDeleteChat = MatrixEventBase[*event.BeeperChatDeleteEventContent]
+type MatrixBlockUser = MatrixEventBase[*event.BeeperBlockUserEventContent]
 type MatrixAcceptMessageRequest = MatrixEventBase[*event.BeeperAcceptMessageRequestEventContent]
 type MatrixMarkedUnread = MatrixRoomMeta[*event.MarkedUnreadEventContent]
 type MatrixMute = MatrixRoomMeta[*event.BeeperMuteEventContent]

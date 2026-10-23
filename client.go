@@ -795,7 +795,7 @@ func (cli *Client) prepareRequestAttempt(origCtx context.Context, req *http.Requ
 
 	// if there's no retry trigger, nothing to do
 	if cli.RequestRetryTrigger == nil {
-		return req, nil, "", nil
+		return req, nil, token, nil
 	}
 
 	attemptCtx, cancel := context.WithCancelCause(req.Context())
@@ -2622,6 +2622,32 @@ func (cli *Client) RTCTransports(ctx context.Context) (resp *RespRTCTransports, 
 	return
 }
 
+func (cli *Client) RTCLivekitGetToken(ctx context.Context, req *ReqRTCLivekitGetToken) (resp *RespRTCLivekitGetToken, err error) {
+	var urlPath string
+	if cli.SpecVersions.Supports(FeatureUnstableMatrixRTC) {
+		urlPath = cli.BuildClientURL("unstable", "io.element.msc4195", "rtc", "livekit", "get_token")
+	} else if cli.SpecVersions.Supports(FeatureStableMatrixRTC) {
+		urlPath = cli.BuildClientURL("v1", "rtc", "livekit", "get_token")
+	} else {
+		return nil, fmt.Errorf("server does not advertise MatrixRTC support")
+	}
+	_, err = cli.MakeRequest(ctx, http.MethodPost, urlPath, req, &resp)
+	return
+}
+
+func (cli *Client) RTCLivekitDelegateDelayedLeave(ctx context.Context, req *ReqRTCLivekitDelegateDelayedLeave) (resp *RespRTCLivekitDelegateDelayedLeave, err error) {
+	var urlPath string
+	if cli.SpecVersions.Supports(FeatureUnstableMatrixRTC) {
+		urlPath = cli.BuildClientURL("unstable", "io.element.msc4195", "rtc", "livekit", "delegate_delayed_leave")
+	} else if cli.SpecVersions.Supports(FeatureStableMatrixRTC) {
+		urlPath = cli.BuildClientURL("v1", "rtc", "livekit", "delegate_delayed_leave")
+	} else {
+		return nil, fmt.Errorf("server does not advertise MatrixRTC support")
+	}
+	_, err = cli.MakeRequest(ctx, http.MethodPost, urlPath, req, &resp)
+	return
+}
+
 func (cli *Client) CreateAlias(ctx context.Context, alias id.RoomAlias, roomID id.RoomID) (resp *RespAliasCreate, err error) {
 	urlPath := cli.BuildClientURL("v3", "directory", "room", alias)
 	_, err = cli.MakeRequest(ctx, http.MethodPut, urlPath, &ReqAliasCreate{RoomID: roomID}, &resp)
@@ -2964,6 +2990,12 @@ func (cli *Client) ReportRoom(ctx context.Context, roomID id.RoomID, reason stri
 	return err
 }
 
+func (cli *Client) ReportUser(ctx context.Context, userID id.UserID, reason string) error {
+	urlPath := cli.BuildClientURL("v3", "users", userID, "report")
+	_, err := cli.MakeRequest(ctx, http.MethodPost, urlPath, &ReqReport{Reason: reason}, nil)
+	return err
+}
+
 func (cli *Client) SetPusher(ctx context.Context, req *Pusher) error {
 	urlPath := cli.BuildClientURL("v3", "pushers", "set")
 	_, err := cli.MakeRequest(ctx, http.MethodPost, urlPath, req, nil)
@@ -2972,7 +3004,7 @@ func (cli *Client) SetPusher(ctx context.Context, req *Pusher) error {
 
 func (cli *Client) GetPushers(ctx context.Context) (resp *RespPushers, err error) {
 	urlPath := cli.BuildClientURL("v3", "pushers")
-	_, err = cli.MakeRequest(ctx, http.MethodPost, urlPath, nil, &resp)
+	_, err = cli.MakeRequest(ctx, http.MethodGet, urlPath, nil, &resp)
 	return
 }
 

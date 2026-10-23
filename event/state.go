@@ -252,6 +252,7 @@ type BridgeInfoSection struct {
 
 	Receiver       string `json:"fi.mau.receiver,omitempty"`
 	MessageRequest bool   `json:"com.beeper.message_request,omitzero"`
+	UserBlocked    bool   `json:"com.beeper.user_blocked,omitzero"`
 }
 
 // BridgeEventContent represents the content of a m.bridge state event.
@@ -265,9 +266,6 @@ type BridgeEventContent struct {
 
 	BeeperRoomType   string `json:"com.beeper.room_type,omitempty"`
 	BeeperRoomTypeV2 string `json:"com.beeper.room_type.v2,omitempty"`
-
-	TempSlackRemoteIDMigratedFlag  bool `json:"com.beeper.slack_remote_id_migrated,omitzero"`
-	TempSlackRemoteIDMigratedFlag2 bool `json:"com.beeper.slack_remote_id_really_migrated,omitzero"`
 }
 
 // DisappearingType represents the type of a disappearing message timer.
