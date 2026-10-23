@@ -5689,8 +5689,10 @@ func (portal *Portal) UpdateInfo(ctx context.Context, info *ChatInfo, source *Us
 		changed = true
 		portal.MessageRequest = *info.MessageRequest
 	}
+	userBlockedChanged := false
 	if info.UserBlocked != nil && *info.UserBlocked != portal.UserBlocked && portal.RoomType == database.RoomTypeDM {
 		changed = true
+		userBlockedChanged = true
 		portal.UserBlocked = *info.UserBlocked
 	}
 	if info.Members != nil && portal.MXID != "" && source != nil {
@@ -5703,6 +5705,10 @@ func (portal *Portal) UpdateInfo(ctx context.Context, info *ChatInfo, source *Us
 		portal.updateOtherUser(ctx, info.Members)
 	}
 	changed = portal.UpdateInfoFromGhost(ctx, nil) || changed
+	if userBlockedChanged {
+		// After the members, which set OtherUserID.
+		portal.mirrorBlockToIgnoreList(ctx, source)
+	}
 	if source != nil {
 		source.MarkInPortal(ctx, portal)
 		portal.updateUserLocalInfo(ctx, info.UserLocal, source, false)
