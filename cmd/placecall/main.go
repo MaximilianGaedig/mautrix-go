@@ -20,6 +20,7 @@ import (
 	"github.com/pion/rtp"
 	"github.com/pion/webrtc/v4"
 	"github.com/rs/zerolog"
+
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2/callbridge"
 	"maunium.net/go/mautrix/event"
@@ -211,7 +212,6 @@ loop:
 		fmt.Println("(no answer - expected when nobody picks up; the invite still exercised the bridge)")
 	}
 }
-
 
 // answerCall picks up the next call in the room and reports whether audio arrives.
 //

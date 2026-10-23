@@ -240,9 +240,7 @@ func keyFramePackets(ctx context.Context, mime string, to RTPWriter) {
 	if mime == webrtc.MimeTypeVP8 {
 		payloads = [][]byte{append([]byte{0x10}, keyFrames[mime]...)}
 	} else {
-		for _, nalu := range bytes.Split(keyFrames[mime], []byte{0, 0, 0, 1})[1:] {
-			payloads = append(payloads, nalu)
-		}
+		payloads = append(payloads, bytes.Split(keyFrames[mime], []byte{0, 0, 0, 1})[1:]...)
 	}
 	seq := uint16(0)
 	for frame := uint32(0); ctx.Err() == nil; frame++ {
