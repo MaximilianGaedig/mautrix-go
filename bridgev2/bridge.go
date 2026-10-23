@@ -316,6 +316,13 @@ func (br *Bridge) MigrateToSplitPortals(ctx context.Context) (bool, func(), erro
 	} else if alreadyMigrated {
 		return false, nil, nil
 	}
+	spmn, ok := br.Network.(SplitPortalMigratingNetwork)
+	if ok {
+		err := spmn.PreSplitPortalMigrate(ctx)
+		if err != nil {
+			return false, nil, fmt.Errorf("failed to prepare split portal migration: %w", err)
+		}
+	}
 	affected, err := br.DB.Portal.MigrateToSplitPortals(ctx)
 	if err != nil {
 		log.WithLevel(zerolog.FatalLevel).Err(err).Msg("Failed to migrate portals")
@@ -328,6 +335,12 @@ func (br *Bridge) MigrateToSplitPortals(ctx context.Context) (bool, func(), erro
 		return false, nil, fmt.Errorf("failed to fix parent portals: %w", err)
 	}
 	log.Info().Int64("rows_affected", affected2).Msg("Updated parent receivers after split portal migration")
+	affected3, err := br.DB.UserPortal.DeleteNonReceiverAfterSplitPortalMigration(ctx)
+	if err != nil {
+		log.Err(err).Msg("Failed to delete user portals of non-receiver logins after split portal migration")
+		return false, nil, fmt.Errorf("failed to delete non-receiver user portals: %w", err)
+	}
+	log.Info().Int64("rows_affected", affected3).Msg("Deleted user portals of non-receiver logins after split portal migration")
 	withoutReceiver, err := br.DB.Portal.GetAllWithoutReceiver(ctx)
 	if err != nil {
 		log.WithLevel(zerolog.FatalLevel).Err(err).Msg("Failed to get portals that failed to migrate")
@@ -403,7 +416,7 @@ func (br *Bridge) StartLoginsForUsers(ctx context.Context, users []*User) {
 	}
 	if !startedAny {
 		br.Log.Info().Msg("No user logins found")
-		br.SendGlobalBridgeState(status.BridgeState{StateEvent: status.StateUnconfigured})
+		br.SendGlobalBridgeState(ctx, status.BridgeState{StateEvent: status.StateUnconfigured})
 	}
 	if !br.Background {
 		go br.RunBackfillQueue()

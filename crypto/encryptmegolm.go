@@ -20,6 +20,7 @@ import (
 	"go.mau.fi/util/exzerolog"
 
 	"maunium.net/go/mautrix"
+	"maunium.net/go/mautrix/crypto/canonicaljson"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
@@ -57,7 +58,7 @@ func getRelatesTo(content any, plaintext json.RawMessage) *event.RelatesTo {
 	}
 	relatable, ok := content.(event.Relatable)
 	if ok {
-		return relatable.OptionalGetRelatesTo()
+		return relatable.OptionalGetRelatesTo().Copy()
 	}
 	return getRawJSON[event.RelatesTo](plaintext, "content", "m.relates_to")
 }
@@ -131,7 +132,7 @@ func (mach *OlmMachine) EncryptMegolmEventWithStateKey(ctx context.Context, room
 	} else if session == nil {
 		return nil, ErrNoGroupSession
 	}
-	plaintext, err := json.Marshal(&rawMegolmEvent{
+	plaintext, err := canonicaljson.Marshal(&rawMegolmEvent{
 		RoomID:   roomID,
 		Type:     evtType,
 		StateKey: stateKey,
@@ -181,6 +182,8 @@ func (mach *OlmMachine) EncryptMegolmEventWithStateKey(ctx context.Context, room
 		if evtType == event.EventReaction || encrypted.RelatesTo.Type == "" {
 			encrypted.RelatesTo = nil
 		}
+	} else if encrypted.RelatesTo != nil && encrypted.RelatesTo.InReplyTo != nil && encrypted.RelatesTo.InReplyTo.BeeperQuote != nil {
+		encrypted.RelatesTo.InReplyTo.BeeperQuote = nil
 	}
 	if mach.PlaintextMentions {
 		encrypted.Mentions = getMentions(content)
@@ -246,7 +249,11 @@ func (mach *OlmMachine) ShareGroupSession(ctx context.Context, roomID id.RoomID,
 	if session == nil || session.Expired() {
 		if session, err = mach.newOutboundGroupSession(ctx, roomID); err != nil {
 			return err
+		} else if err = mach.CryptoStore.AddOutboundGroupSession(ctx, session); err != nil {
+			return fmt.Errorf("failed to store new outbound group session: %w", err)
 		}
+	} else {
+		session.Users = make(map[UserDevice]OGSState)
 	}
 	log = log.With().Str("session_id", session.ID().String()).Logger()
 	ctx = log.WithContext(ctx)

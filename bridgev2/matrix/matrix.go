@@ -106,7 +106,7 @@ func (br *Connector) handleAccountDataEvent(ctx context.Context, evt *event.Even
 }
 
 // handleIgnoredUserList turns the user's ignore list, handed over by the homeserver, into blocks on the
-// networks (bridgev2.UserBlockingNetworkAPI).
+// networks (bridgev2.IgnoreListBlockingNetworkAPI).
 func (br *Connector) handleIgnoredUserList(ctx context.Context, evt *event.Event) {
 	if evt.Sender == "" || br.shouldIgnoreEventFromUser(evt.Sender) {
 		return
