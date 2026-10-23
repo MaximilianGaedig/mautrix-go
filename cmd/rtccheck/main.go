@@ -15,6 +15,7 @@ import (
 
 	"github.com/pion/rtp"
 	"github.com/rs/zerolog"
+
 	"maunium.net/go/mautrix"
 	"maunium.net/go/mautrix/bridgev2/callbridge"
 	"maunium.net/go/mautrix/id"
@@ -29,9 +30,9 @@ func ok(step string, detail string) { fmt.Printf("ok    %s%s\n", step, detail) }
 
 func main() {
 	ctx := context.Background()
-	server := os.Getenv("MX_SERVER")     // e.g. https://maximiliangaedig.com
-	domain := os.Getenv("MX_DOMAIN")     // e.g. maximiliangaedig.com
-	user := os.Getenv("MX_USER")         // localpart
+	server := os.Getenv("MX_SERVER") // e.g. https://maximiliangaedig.com
+	domain := os.Getenv("MX_DOMAIN") // e.g. maximiliangaedig.com
+	user := os.Getenv("MX_USER")     // localpart
 	pass := os.Getenv("MX_PASS")
 
 	cli, err := mautrix.NewClient(server, "", "")

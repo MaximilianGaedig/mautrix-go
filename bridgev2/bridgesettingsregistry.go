@@ -96,7 +96,7 @@ func (s *BridgeSetting) control() BridgeSettingControl {
 // that could never be rendered or set fails at startup rather than in front of a user.
 func (s *BridgeSetting) validate() error {
 	if !settingKeyRegex.MatchString(s.Key) {
-		return fmt.Errorf("setting key %q must be lowercase letters, digits, _ and .", s.Key)
+		return fmt.Errorf("setting key %q may only contain lowercase letters, digits, underscores and dots", s.Key)
 	}
 	if s.Scope != SettingScopeLogin && s.Scope != SettingScopeRoom {
 		return fmt.Errorf("setting %s: unknown scope %q", s.Key, s.Scope)

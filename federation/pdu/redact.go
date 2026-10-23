@@ -81,7 +81,7 @@ func RedactContent(eventType string, content jsontext.Value, roomVersion id.Room
 	case "m.room.history_visibility":
 		return filteredObject(content, "history_visibility")
 	case "m.room.redaction":
-		if roomVersion.RedactsInContent() {
+		if roomVersion.UpdatedRedactionRules() {
 			return filteredObject(content, "redacts")
 		}
 		return emptyObject
@@ -104,9 +104,7 @@ func (pdu *PDU) Redact(roomVersion id.RoomVersion) *PDU {
 		pdu.DeprecatedOrigin = nil
 		pdu.DeprecatedMembership = nil
 	}
-	if pdu.Type != "m.room.redaction" || roomVersion.RedactsInContent() {
-		pdu.Redacts = nil
-	}
+	pdu.Redacts = nil
 	pdu.Content = RedactContent(pdu.Type, pdu.Content, roomVersion)
 	return pdu
 }

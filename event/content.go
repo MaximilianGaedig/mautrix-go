@@ -41,8 +41,7 @@ var TypeMap = map[Type]reflect.Type{
 	StateSpaceParent:       reflect.TypeFor[SpaceParentEventContent](),
 	StateSpaceChild:        reflect.TypeFor[SpaceChildEventContent](),
 
-	StateRoomPolicy:         reflect.TypeFor[RoomPolicyEventContent](),
-	StateUnstableRoomPolicy: reflect.TypeFor[RoomPolicyEventContent](),
+	StateRoomPolicy: reflect.TypeFor[RoomPolicyEventContent](),
 
 	StateImagePack:         reflect.TypeFor[ImagePackEventContent](),
 	StateUnstableImagePack: reflect.TypeFor[ImagePackEventContent](),
@@ -72,6 +71,7 @@ var TypeMap = map[Type]reflect.Type{
 	BeeperTranscription:          reflect.TypeFor[BeeperTranscriptionEventContent](),
 	BeeperViewLimitedMediaUpdate: reflect.TypeFor[BeeperViewLimitedMediaUpdateContent](),
 	BeeperDeleteChat:             reflect.TypeFor[BeeperChatDeleteEventContent](),
+	BeeperBlockUser:              reflect.TypeFor[BeeperBlockUserEventContent](),
 	BeeperAcceptMessageRequest:   reflect.TypeFor[BeeperAcceptMessageRequestEventContent](),
 	BeeperSendState:              reflect.TypeFor[BeeperSendStateEventContent](),
 

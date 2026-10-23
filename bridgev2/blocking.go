@@ -13,18 +13,21 @@ import (
 
 	"github.com/rs/zerolog"
 
+	"maunium.net/go/mautrix/bridgev2/database"
 	"maunium.net/go/mautrix/bridgev2/networkid"
 	"maunium.net/go/mautrix/event"
 	"maunium.net/go/mautrix/id"
 )
 
-// UserBlockingNetworkAPI is an optional interface that network connectors can implement to block people.
-// Matrix's block is the user's ignore list: ignoring a ghost blocks the person it stands for, and
-// un-ignoring it unblocks them.
-type UserBlockingNetworkAPI interface {
-	NetworkAPI
-	HandleMatrixBlock(ctx context.Context, ghost *Ghost, blocked bool) error
-}
+// Matrix's block is the user's ignore list: ignoring a ghost blocks the person it stands for, and un-ignoring it
+// unblocks them. Upstream's UserBlockingNetworkAPI (com.beeper.block_user, sent in a DM) does the blocking on the
+// network; this file only adds the ignore list on top of it, in both directions:
+//
+//   - Matrix to network: HandleIgnoredUserList calls HandleMatrixBlockUser for each DM portal the user has with
+//     a newly (un)ignored ghost, exactly as if com.beeper.block_user had been sent in that DM.
+//   - Network to Matrix: when a connector reports ChatInfo.UserBlocked for a DM (upstream's way to say the person
+//     was blocked or unblocked on the network), Portal.UpdateInfo mirrors it into the ignore list through the
+//     double puppet (mirrorBlockToIgnoreList).
 
 // GlobalAccountDataMatrixAPI is a MatrixAPI that can read and write the user's global account data, which the
 // double puppet needs to mirror a block from the network into the ignore list.
@@ -58,8 +61,9 @@ func ignoreListChanges(now, prev *event.IgnoredUserListEventContent) (ignored, u
 	return
 }
 
-// HandleIgnoredUserList blocks or unblocks, on each of the sender's logins that can, the people whose ghosts
-// the sender started or stopped ignoring.
+// HandleIgnoredUserList blocks or unblocks, through upstream's UserBlockingNetworkAPI, the people whose ghosts
+// the sender started or stopped ignoring, in every DM portal the sender's logins have with them. A ghost the user
+// has no DM with is left alone: upstream's block is addressed by DM portal.
 func (br *Bridge) HandleIgnoredUserList(ctx context.Context, evt *event.Event) {
 	log := zerolog.Ctx(ctx).With().Str("action", "handle ignored user list").Stringer("sender", evt.Sender).Logger()
 	ctx = log.WithContext(ctx)
@@ -79,18 +83,13 @@ func (br *Bridge) HandleIgnoredUserList(ctx context.Context, evt *event.Event) {
 		if !isGhost {
 			return
 		}
-		ghost, err := br.GetGhostByID(ctx, ghostID)
-		if err != nil || ghost == nil {
-			return
-		}
 		for _, login := range user.GetUserLogins() {
 			api, ok := login.Client.(UserBlockingNetworkAPI)
 			if !ok {
 				continue
 			}
-			if err := api.HandleMatrixBlock(ctx, ghost, blocked); err != nil {
-				log.Err(err).Str("ghost_id", string(ghostID)).Bool("blocked", blocked).
-					Str("login_id", string(login.ID)).Msg("Failed to change block")
+			for _, portal := range br.dmPortalsOf(ctx, login, ghostID) {
+				portal.blockFromIgnoreList(ctx, api, blocked)
 			}
 		}
 	}
@@ -99,6 +98,63 @@ func (br *Bridge) HandleIgnoredUserList(ctx context.Context, evt *event.Event) {
 	}
 	for _, userID := range unignored {
 		change(userID, false)
+	}
+}
+
+// dmPortalsOf is the DM portals the login has with the ghost: its own (split portals), or a shared one it is in.
+func (br *Bridge) dmPortalsOf(ctx context.Context, login *UserLogin, ghostID networkid.UserID) (out []*Portal) {
+	log := zerolog.Ctx(ctx).With().Str("ghost_id", string(ghostID)).Str("login_id", string(login.ID)).Logger()
+	portals, err := br.GetDMPortalsWith(ctx, ghostID)
+	if err != nil {
+		log.Err(err).Msg("Failed to find DM portals to change block")
+		return nil
+	}
+	for _, portal := range portals {
+		if portal.Receiver == login.ID {
+			out = append(out, portal)
+		} else if portal.Receiver == "" {
+			if up, err := br.DB.UserPortal.Get(ctx, login.UserLogin, portal.PortalKey); err == nil && up != nil {
+				out = append(out, portal)
+			}
+		}
+	}
+	if len(out) == 0 {
+		log.Debug().Msg("No DM portal with ignored ghost, not changing block")
+	}
+	return out
+}
+
+// blockFromIgnoreList is upstream's handleMatrixBlockUser for a block that came from the ignore list instead of a
+// com.beeper.block_user event. A portal already in that state is skipped: that is our own ignore-list write
+// (mirrorBlockToIgnoreList) coming back.
+func (portal *Portal) blockFromIgnoreList(ctx context.Context, api UserBlockingNetworkAPI, blocked bool) {
+	if portal.UserBlocked == blocked {
+		return
+	}
+	log := zerolog.Ctx(ctx).With().Stringer("portal_key", portal.PortalKey).Bool("blocked", blocked).Logger()
+	err := api.HandleMatrixBlockUser(ctx, &MatrixBlockUser{
+		Content: &event.BeeperBlockUserEventContent{Block: blocked},
+		Portal:  portal,
+	})
+	if err != nil {
+		log.Err(err).Msg("Failed to change block from ignore list")
+		return
+	}
+	portal.UserBlocked = blocked
+	portal.UpdateBridgeInfo(ctx)
+	if err = portal.Save(ctx); err != nil {
+		log.Err(err).Msg("Failed to save portal after block from ignore list")
+	}
+}
+
+// mirrorBlockToIgnoreList puts the DM's other user on the source's ignore list when the network says they are
+// blocked, and takes them off it when they are unblocked.
+func (portal *Portal) mirrorBlockToIgnoreList(ctx context.Context, source *UserLogin) {
+	if source == nil || portal.RoomType != database.RoomTypeDM || portal.OtherUserID == "" {
+		return
+	}
+	if err := source.SetGhostBlocked(ctx, portal.OtherUserID, portal.UserBlocked); err != nil {
+		zerolog.Ctx(ctx).Err(err).Bool("blocked", portal.UserBlocked).Msg("Failed to mirror block into ignore list")
 	}
 }
 
