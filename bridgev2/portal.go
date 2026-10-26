@@ -5564,6 +5564,12 @@ func (portal *Portal) updateParent(ctx context.Context, newParentID networkid.Po
 		newParent.Receiver = portal.Receiver
 	}
 	if portal.ParentKey == newParent {
+		// The parent is right but the room may never have been added to it, e.g. a room carried over from a
+		// legacy bridge database with in_space=false. Room creation is the only other place that adds it.
+		if portal.MXID != "" && !portal.InSpace && portal.Parent != nil && portal.Parent.MXID != "" {
+			portal.addToParentSpaceAndSave(ctx, false)
+			return portal.InSpace
+		}
 		return false
 	}
 	var err error
